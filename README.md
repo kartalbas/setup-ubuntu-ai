@@ -119,3 +119,66 @@ sizes). No hard-coded model list.
 
 Ubuntu 24.04+ (tested target 26.04), `sudo`, internet access. `whiptail`,
 `pciutils`, `curl`, `gnupg`, `git` are installed automatically if missing.
+
+## Field notes: RTX 5090 in an AG03 OcuLink eGPU dock
+
+Hard-won, real-world experience from this exact build (RTX 5090 in an **AG03
+OcuLink eGPU dock**, driven over OcuLink/PCIe). Save yourself the weekend.
+
+### The crash
+
+Under sustained inference load the GPU threw **`Xid 79 — "GPU has fallen off the
+bus"`** after ~3–5 minutes, every time, needing a reboot to recover
+(`Xid 154 — "Node Reboot Required"`). Core temp was fine (~67 °C; it throttles
+~83 °C), so it was **not thermal**.
+
+### What it was NOT (each tested and ruled out)
+
+- **The model** — crashed on two different GGUFs.
+- **The context size** — crashed at both 128k and 256k.
+- **The OcuLink data cable** — swapped it; the PCIe link trained cleanly to
+  **Gen4 x4 under load** and it *still* crashed. (x4 is normal for OcuLink; the
+  link being healthy right up to the fall-off pointed away from the data path.)
+
+### Root cause: GPU power delivery
+
+A power-draw **sag (400 W → 342 W) was logged in the seconds before each
+fall-off** — a brownout, not a data-link fault. The dock's power path could not
+hold a 400 W-capped 5090 under sustained load. Current heating a marginal /
+under-seated **12V-2×6** connector over a few minutes is exactly the "runs fine,
+then dies after a while under load" signature.
+
+### The fix: a dedicated external PSU
+
+Feed the GPU's 12V-2×6 from its **own PSU** (here a Corsair **SF1000**) instead
+of relying on the dock. After this: an **8-minute sustained 400 W soak with zero
+Xid** (peak 64 °C, 411 W), then stable under real workloads.
+
+### Gotcha that will cost you an hour — the standalone PSU won't power on
+
+A loose ATX PSU stays **OFF** until `PS_ON` is pulled to ground. Connecting only
+the two PCIe / 12V-2×6 cables is **not enough** — the PSU never starts, its fan
+doesn't spin, and the **GPU LEDs stay dark** on PC power-on. (Confirm the card is
+fine: it lights up when drawing from the dock instead.) To start it:
+
+- Connect the **24-pin** header and **bridge `PS_ON` (green) to any ground
+  (black)** — a ~€5 jumper / "paperclip" adapter, or literally a paperclip.
+- **Power-on order: external PSU first, then the PC.**
+- **Fully seat the 12V-2×6** at the GPU until it clicks — an under-seated
+  connector is the classic melt / brownout cause.
+
+### Two PSUs on one outlet — safe
+
+Both PSUs on the **same grounded** power strip (a proper 16 A strip, not a thin
+travel one) is fine and in fact **preferred**: they share a ground reference
+through PE. A 5090 system draws ~600–800 W; a 230 V / 16 A circuit supplies
+~3680 W, so you are far from the limit. Minor inrush when both PSUs start
+together is harmless on a normal B16 breaker. The non-negotiable is a genuinely
+**earthed** outlet/strip.
+
+### Software mitigation (not a substitute for the above)
+
+`sudo ./setup.sh power 400` caps sustained draw and re-applies it on every boot.
+It *reduces* brownout odds but does **not** fix marginal cabling or an
+underpowered dock — the dedicated PSU and a fully-seated 12V-2×6 are the real
+fix.
