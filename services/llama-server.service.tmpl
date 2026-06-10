@@ -1,0 +1,25 @@
+[Unit]
+Description=llama.cpp server (setup-ubuntu-ai)
+Documentation=https://github.com/ggml-org/llama.cpp
+After=network-online.target
+Wants=network-online.target
+# Give up after 5 failures in 60s instead of rapid-looping on a config error.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=@USER@
+SupplementaryGroups=video render
+EnvironmentFile=@ENVFILE@
+# Braced vars are single tokens; $LLAMA_EXTRA_ARGS is intentionally unbraced so
+# systemd splits it into multiple arguments (e.g. "--flash-attn --api-key X").
+ExecStart=@BIN@ --model ${LLAMA_MODEL} --host ${LLAMA_HOST} --port ${LLAMA_PORT} --ctx-size ${LLAMA_CTX} --n-gpu-layers ${LLAMA_NGL} $LLAMA_EXTRA_ARGS
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+# Give the model loader plenty of time on first start.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
