@@ -8,7 +8,7 @@ Supported hardware:
 
 | GPU | Backend | Notes |
 |-----|---------|-------|
-| **NVIDIA RTX 5090** (Blackwell, `sm_120`) | CUDA | open kernel driver `nvidia-driver-595-open` + CUDA toolkit |
+| **NVIDIA RTX 50-series** (Blackwell, `sm_120`) — e.g. RTX 5090 (32 GB), **RTX 5080 (16 GB)** | CUDA | open kernel driver `nvidia-driver-595-open` + CUDA toolkit |
 | **AMD Ryzen AI Max+ 395 "Strix Halo"** (Radeon 8060S, `gfx1151`) | **Vulkan only** (no ROCm) | Mesa RADV; settable unified-memory / VRAM split |
 
 It also degrades gracefully for other NVIDIA/AMD GPUs (manual vendor pick).

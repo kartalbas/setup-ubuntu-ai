@@ -9,8 +9,8 @@ HF_API="https://huggingface.co/api"
 _mm_ensure_tools() {
   have jq    || { narrate "Installing jq (parses the Hugging Face search API)."; apt_install jq; }
   have curl  || apt_install curl
-  if run_as_user bash -lc 'command -v hf || command -v huggingface-cli' >/dev/null 2>&1; then
-    log_ok "Hugging Face CLI present."
+  if run_as_user bash -lc 'command -v hf' >/dev/null 2>&1; then
+    log_ok "Hugging Face CLI present (hf)."
   else
     narrate "Installing the huggingface_hub CLI via pipx (for resumable downloads + auth)."
     apt_install pipx
@@ -24,7 +24,6 @@ _mm_ensure_tools() {
 _hf() {
   run_as_user bash -lc '
     if command -v hf >/dev/null 2>&1; then hf "$@";
-    elif command -v huggingface-cli >/dev/null 2>&1; then huggingface-cli "$@";
     else "$HOME/.local/bin/hf" "$@"; fi' _ "$@"
 }
 

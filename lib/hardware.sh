@@ -22,10 +22,22 @@ detect_hardware() {
 
   HW_VENDOR="unknown"; HW_MODEL="Unrecognized GPU"; HW_GFX=""; HW_SM=""; HW_VRAM_GB=""
 
-  # --- NVIDIA RTX 5090 / Blackwell ---
+  # --- NVIDIA RTX 50-series / Blackwell (all sm_120) ---
+  # The whole consumer Blackwell family shares CUDA arch sm_120; only the model
+  # name and VRAM differ. Match specific known cards first (for accurate VRAM
+  # before the driver/nvidia-smi exists), then any GB20x / RTX 50xx generically.
   if grep -qiE "\[${_NVIDIA_VENDOR}:2b85\]|RTX 5090|GB202" <<<"$pci"; then
     HW_VENDOR="nvidia"; HW_MODEL="NVIDIA GeForce RTX 5090 (Blackwell, sm_120)"
     HW_SM="120"; HW_VRAM_GB="32"
+  elif grep -qiE "\[${_NVIDIA_VENDOR}:2c02\]|RTX 5080" <<<"$pci"; then
+    HW_VENDOR="nvidia"; HW_MODEL="NVIDIA GeForce RTX 5080 (Blackwell, sm_120)"
+    HW_SM="120"; HW_VRAM_GB="16"
+  elif grep -qiE "GB20[0-9]|RTX 50[0-9]{2}" <<<"$pci"; then
+    # Other RTX 50-series (5070 Ti/5070/…): same CUDA arch, VRAM via nvidia-smi.
+    HW_VENDOR="nvidia"
+    HW_MODEL="$(grep -iE 'VGA|3D' <<<"$pci" | grep -iE "${_NVIDIA_VENDOR}|NVIDIA" | head -1 | sed 's/.*: //')" || true
+    HW_MODEL="${HW_MODEL:-NVIDIA GeForce RTX 50-series (Blackwell)} (sm_120)"
+    HW_SM="120"; HW_VRAM_GB=""
   elif grep -qiE "VGA.*${_NVIDIA_VENDOR}|3D controller.*${_NVIDIA_VENDOR}|NVIDIA Corporation" <<<"$pci"; then
     # Some other NVIDIA card — supported via the same CUDA path, arch unknown.
     HW_VENDOR="nvidia"
