@@ -29,12 +29,23 @@ _nv_secureboot_preflight() {
   fi
   log_warn "Secure Boot is ENABLED."
   narrate "Blackwell needs the open kernel module; under Secure Boot a module must be signed & enrolled."
+
+  # Unattended (restore): honour the strategy already in the config instead of
+  # prompting. 'canonical' needs no console — Ubuntu's pre-signed
+  # linux-modules-nvidia are trusted via Canonical's CA in the shim db — so the
+  # whole driver step runs hands-off. (A 'mok' strategy still needs a physical
+  # console at reboot; no script can avoid that.)
   local c
-  c="$(ui_menu "Secure Boot" "Secure Boot is enabled. How should kernel-module signing be handled?" \
-        canonical "Use Ubuntu's pre-signed modules — recommended, no console needed" \
-        mok       "Enroll a MOK key now — requires PHYSICAL CONSOLE at reboot" \
-        disable   "I'll disable Secure Boot in BIOS myself" \
-        abort     "Abort the driver install")" || c=abort
+  if [[ -n "${NONINTERACTIVE:-}" ]]; then
+    c="$(cfg_get NVIDIA_MOK_STRATEGY canonical)"
+    log_info "Non-interactive: using Secure Boot strategy from config → ${c}"
+  else
+    c="$(ui_menu "Secure Boot" "Secure Boot is enabled. How should kernel-module signing be handled?" \
+          canonical "Use Ubuntu's pre-signed modules — recommended, no console needed" \
+          mok       "Enroll a MOK key now — requires PHYSICAL CONSOLE at reboot" \
+          disable   "I'll disable Secure Boot in BIOS myself" \
+          abort     "Abort the driver install")" || c=abort
+  fi
   case "$c" in
     canonical) cfg_set NVIDIA_MOK_STRATEGY canonical
                narrate "Preferring Canonical-signed linux-modules-nvidia over a DKMS build." ;;
