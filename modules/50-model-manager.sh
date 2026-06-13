@@ -147,9 +147,44 @@ _mm_resolve() {   # echo the path llama-server should load
   fi
 }
 
+# _mm_from_config — non-interactive download driven purely by the saved
+# coordinates (MODEL_REPO + MODEL_FILE). Skips the HF browser entirely; used by
+# the `restore` flow so one config reproduces the exact model. Returns 1 if the
+# coordinates are missing or the download yields no .gguf.
+_mm_from_config() {
+  local repo file dir model
+  repo="$(cfg_get MODEL_REPO)"; file="$(cfg_get MODEL_FILE)"
+  dir="$(cfg_get MODEL_DIR "$INVOKING_HOME/models")"
+  [[ -n "$repo" && -n "$file" ]] || return 1
+  log_info "Restoring model from config: ${repo} :: ${file}"
+  ensure_dir "$dir" 0755
+  run chown "$INVOKING_USER" "$dir" 2>/dev/null || true
+  model="$(_mm_resolve "$dir" "$file")"
+  if [[ -n "$model" && -e "$model" ]]; then
+    log_ok "Model already present: ${model}"
+  else
+    _mm_download "$repo" "$file" "$dir"
+    model="$(_mm_resolve "$dir" "$file")"
+  fi
+  [[ -n "$model" && -e "$model" ]] || { log_warn "Config-driven download yielded no .gguf under ${dir}."; return 1; }
+  cfg_set LLAMA_MODEL "$model"; cfg_save
+  log_ok "Model ready: ${model}"
+}
+
 module_main() {
   log_step "Model browser (Hugging Face search)"
   _mm_ensure_tools
+
+  # Non-interactive restore, or unattended run with coordinates already saved:
+  # fetch exactly what the config names and skip the interactive browser.
+  if [[ -n "${NONINTERACTIVE:-}" || -n "${ASSUME_YES:-}" ]] && [[ -n "$(cfg_get MODEL_REPO)" ]]; then
+    if _mm_from_config; then
+      log_info "Next: configure runtime →  sudo ${SCRIPT_PATH##*/} configure"
+      return 0
+    fi
+    [[ -n "${NONINTERACTIVE:-}" ]] && { log_warn "Cannot restore model from config; aborting non-interactive model step."; return 1; }
+    log_warn "Config-driven download unavailable; falling back to interactive browser."
+  fi
 
   local dir; dir="$(cfg_get MODEL_DIR "$INVOKING_HOME/models")"
   dir="$(ui_input "Directory to store models" "$dir")" || return 0
@@ -163,6 +198,11 @@ module_main() {
     # no quants / back → search again
   done
   IFS=$'\t' read -r pathspec bytes <<<"$quant"
+
+  # Capture provenance so `restore` can re-fetch this exact model from config.
+  cfg_set MODEL_REPO "$repo"
+  cfg_set MODEL_FILE "$pathspec"
+  cfg_save
 
   local need; need="$(awk -v b="$bytes" 'BEGIN{printf "%d", (b/1073741824)+2}')"
   require_space "$dir" "${need:-3}" "model download"

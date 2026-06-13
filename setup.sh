@@ -43,6 +43,8 @@ ${C_BOLD}COMMANDS${C_RST} (run them in this order, one at a time, or use the men
   status           Show detected hardware, config and service state
   uninstall [what] Reverse a step (drivers|llamacpp|service|all)
   resume           Continue a guided run interrupted by a reboot
+  restore          Rebuild the whole stack unattended from config (A→Z):
+                   drivers, llama.cpp, the exact model, runtime + service
   menu             Open the interactive menu (default when no command given)
 
 ${C_BOLD}FLAGS${C_RST}
@@ -216,10 +218,55 @@ cmd_resume() {
   guided_all "$from"
 }
 
+# _restore_rehome — make a config carried from another machine portable. The
+# config may embed absolute paths under a different user's home (e.g. another
+# mini-PC's /home/<other>); rewrite that home prefix to THIS machine's home so
+# the model dir, llama.cpp dir and binary land in the right place. The GPU is
+# the same external eGPU, so only the host-side paths move. No-op when the home
+# already matches. Detected/derived keys (HW_*, LLAMA_MODEL, LLAMACPP_BIN) are
+# re-set by the steps themselves, so this just keeps the *roots* correct.
+_restore_rehome() {
+  local new_home="$INVOKING_HOME" old_home="" k v
+  for k in LLAMA_MODEL LLAMACPP_DIR MODEL_DIR LLAMACPP_BIN; do
+    v="$(cfg_get "$k")"
+    if [[ "$v" =~ ^(/home/[^/]+|/root) ]]; then old_home="${BASH_REMATCH[1]}"; break; fi
+  done
+  [[ -z "$old_home" || "$old_home" == "$new_home" ]] && return 0
+  log_warn "Config paths reference ${old_home}; remapping to ${new_home} for this machine."
+  for k in LLAMA_MODEL LLAMACPP_DIR LLAMACPP_BIN MODEL_DIR; do
+    v="$(cfg_get "$k")"; [[ -n "$v" ]] && cfg_set "$k" "${v/#$old_home/$new_home}"
+  done
+  cfg_save
+}
+
+# cmd_restore — config-driven, unattended rebuild of the whole stack. The
+# config file is the single source of truth: hardware profile, driver package,
+# model coordinates (MODEL_REPO/MODEL_FILE) and runtime args all come from it,
+# and the chat template is regenerated from the downloaded GGUF. Nothing model-
+# specific is committed to the repo. Designed to run on a FRESH machine with the
+# same external GPU: hardware is re-detected, paths are re-homed to the new
+# user, and stale state flags (CUDA_OK/SERVICE_INSTALLED) are harmless because
+# every phase re-runs unconditionally. A NVIDIA Secure-Boot/MOK reboot still
+# pauses the run; continue with `resume` afterwards.
+cmd_restore() {
+  log_step "Restore: rebuild the whole stack from config (A→Z, unattended)"
+  if [[ -z "$(cfg_get MODEL_REPO)" || -z "$(cfg_get MODEL_FILE)" ]]; then
+    die "No MODEL_REPO/MODEL_FILE in ${CONFIG_FILE}. Run 'sudo ${0##*/} model' once to capture them (or add them by hand), then retry."
+  fi
+  _restore_rehome
+  log_info "Target    : user=${INVOKING_USER} home=${INVOKING_HOME}"
+  log_info "Model     : $(cfg_get MODEL_REPO) :: $(cfg_get MODEL_FILE)"
+  log_info "Model dir : $(cfg_get MODEL_DIR "$INVOKING_HOME/models")"
+  log_info "Context   : $(cfg_get LLAMA_CTX 8192) tokens, ngl=$(cfg_get LLAMA_NGL 999)"
+  log_info "Template  : chat-template fixup=$(cfg_get CHAT_TEMPLATE_FIXUP 0)"
+  ASSUME_YES=1 NONINTERACTIVE=1
+  guided_all detect
+}
+
 # guided_all [START_VERB] — walk the phases in order, skipping completed steps.
 guided_all() {
   local start="${1:-detect}" started=0
-  local phases=(detect drivers build model configure service doctor)
+  local phases=(detect drivers power build model configure service doctor)
   ensure_hw_detected
   for p in "${phases[@]}"; do
     [[ "$started" == 0 && "$p" != "$start" ]] && continue
@@ -231,6 +278,13 @@ guided_all() {
                  if (( MODULE_RC != 0 )); then
                    log_warn "Driver step did not finish; stopping guided run here."
                    return 0
+                 fi ;;
+      power)     # Only when a cap is configured (NVIDIA); pass it explicitly so
+                 # the step stays non-interactive. Skipped otherwise.
+                 if [[ -n "$(cfg_get NVIDIA_POWER_LIMIT_W)" ]]; then
+                   run_module 35-power-limit "$(cfg_get NVIDIA_POWER_LIMIT_W)"
+                 else
+                   log_info "No power limit configured — skipping."
                  fi ;;
       build)     run_module 40-build-llamacpp ;;
       model)     run_module 50-model-manager ;;
@@ -357,6 +411,7 @@ main() {
     status)     cmd_status ;;
     uninstall)  cmd_uninstall "${VERB_ARGS[@]}" ;;
     resume)     cmd_resume ;;
+    restore)    cmd_restore ;;
     menu)       main_menu ;;
     *)          die "Unknown command: ${VERB} (try --help)" ;;
   esac

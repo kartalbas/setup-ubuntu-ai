@@ -5,6 +5,80 @@
 # shellcheck source=/dev/null
 
 LLAMA_ENV_FILE="/etc/setup-ubuntu-ai/llama-server.env"
+CHAT_TEMPLATE_DIR="/etc/setup-ubuntu-ai"
+
+# _chat_template_path MODEL — deterministic path for the generated template,
+# derived from the model filename so nothing extra needs to be stored.
+_chat_template_path() {
+  local base; base="$(basename "${1:-model}")"; base="${base%.gguf}"
+  printf '%s/%s-template.jinja' "$CHAT_TEMPLATE_DIR" "$base"
+}
+
+# regen_chat_template MODEL OUT — extract the chat template embedded in the
+# GGUF and neutralise every raise_exception(...) guard, then write OUT.
+# Why: the stock Mistral/Devstral template raises on consecutive same-role
+# turns ("roles must alternate"), which OpenCode legitimately produces. Each
+# guard is an isolated `{{- raise_exception(...) }}` inside an if/else, so
+# blanking the call leaves a harmless empty block and keeps all the real
+# [INST]/[SYSTEM_PROMPT]/[TOOL_CALLS] handling intact. Derived from the model
+# at restore time — never committed. Returns 1 if the GGUF has no template.
+regen_chat_template() {
+  local model="$1" out="$2" tmpl
+  [[ -f "$model" ]] || { log_warn "Model not found for template regen: $model"; return 1; }
+  have python3 || { log_warn "python3 needed to regenerate the chat template."; return 1; }
+  tmpl="$(python3 - "$model" <<'PY'
+import sys, struct, re
+f = open(sys.argv[1], 'rb')
+if f.read(4) != b'GGUF': sys.exit(1)
+struct.unpack('<I', f.read(4)); struct.unpack('<Q', f.read(8))
+n_kv, = struct.unpack('<Q', f.read(8))
+def rstr():
+    ln, = struct.unpack('<Q', f.read(8)); return f.read(ln).decode('utf-8','replace')
+M = {0:('<B',1),1:('<b',1),2:('<H',2),3:('<h',2),4:('<I',4),5:('<i',4),
+     6:('<f',4),7:('<?',1),10:('<Q',8),11:('<q',8),12:('<d',8)}
+def rval(t):
+    if t in M: fmt,sz = M[t]; return struct.unpack(fmt, f.read(sz))[0]
+    if t == 8: return rstr()
+    if t == 9:
+        et, = struct.unpack('<I', f.read(4)); ln, = struct.unpack('<Q', f.read(8))
+        return [rval(et) for _ in range(ln)]
+    raise Exception('unknown gguf value type %d' % t)
+tmpl = None
+for _ in range(n_kv):
+    k = rstr(); vt, = struct.unpack('<I', f.read(4)); v = rval(vt)
+    if k.endswith('chat_template') and isinstance(v, str): tmpl = v
+if not tmpl: sys.exit(2)
+# Blank every raise_exception(...) output statement (non-greedy to the `}}`).
+tmpl = re.sub(r'\{\{-?\s*raise_exception\(.*?\)\s*-?\}\}', '{# guard removed #}', tmpl, flags=re.S)
+sys.stdout.write(tmpl)
+PY
+)" || { log_warn "GGUF has no embedded chat template (exit $?); leaving template unchanged."; return 1; }
+  [[ -n "$tmpl" ]] || return 1
+  ensure_dir "$CHAT_TEMPLATE_DIR" 0755
+  show_diff "$out" <<<"$tmpl" || true
+  printf '%s\n' "$tmpl" | atomic_write "$out"
+  log_ok "Chat template regenerated (validation guards neutralised): $out"
+}
+
+# _ensure_chat_template — regenerate the permissive template if the config asks
+# for it (CHAT_TEMPLATE_FIXUP=1). No-op otherwise.
+_ensure_chat_template() {
+  [[ "$(cfg_get CHAT_TEMPLATE_FIXUP)" == "1" ]] || return 0
+  local model; model="$(cfg_get LLAMA_MODEL)"
+  regen_chat_template "$model" "$(_chat_template_path "$model")" \
+    || log_warn "Chat-template fixup requested but failed; server may reject consecutive user turns."
+}
+
+# _assemble_extra_args — the stored base args plus, when fixup is on, a
+# --chat-template-file pointing at the derived path. Keeping the path out of
+# the stored value means it can never go stale when the model changes.
+_assemble_extra_args() {
+  local extra; extra="$(cfg_get LLAMA_EXTRA_ARGS "--flash-attn on")"
+  if [[ "$(cfg_get CHAT_TEMPLATE_FIXUP)" == "1" && "$extra" != *"--chat-template-file"* ]]; then
+    extra="${extra:+$extra }--chat-template-file $(_chat_template_path "$(cfg_get LLAMA_MODEL)")"
+  fi
+  printf '%s' "$extra"
+}
 
 # _model_max_ctx PATH — read the model's native (max trained) context length
 # straight from the GGUF metadata header (no model load). Prints the integer,
@@ -42,8 +116,10 @@ except Exception:
 PY
 }
 
-# Write the systemd EnvironmentFile from current CFG values.
+# Write the systemd EnvironmentFile from current CFG values. Regenerates the
+# chat template first (if requested) so the --chat-template-file path is valid.
 render_llama_env() {
+  _ensure_chat_template
   local content
   content="$(cat <<EOF
 # Managed by setup-ubuntu-ai — edit then: systemctl restart llama-server
@@ -53,7 +129,7 @@ LLAMA_HOST=$(cfg_get LLAMA_HOST 0.0.0.0)
 LLAMA_PORT=$(cfg_get LLAMA_PORT 8080)
 LLAMA_CTX=$(cfg_get LLAMA_CTX 8192)
 LLAMA_NGL=$(cfg_get LLAMA_NGL 999)
-LLAMA_EXTRA_ARGS=$(cfg_get LLAMA_EXTRA_ARGS "--flash-attn on")
+LLAMA_EXTRA_ARGS=$(_assemble_extra_args)
 EOF
 )"
   ensure_dir "$(dirname "$LLAMA_ENV_FILE")" 0755
@@ -67,7 +143,7 @@ _cfg_cmdline_preview() {
     "$(cfg_get LLAMA_MODEL '<none>')" \
     "$(cfg_get LLAMA_HOST 0.0.0.0)" "$(cfg_get LLAMA_PORT 8080)" \
     "$(cfg_get LLAMA_CTX 8192)" "$(cfg_get LLAMA_NGL 999)" \
-    "$(cfg_get LLAMA_EXTRA_ARGS '--flash-attn')"
+    "$(_assemble_extra_args)"
 }
 
 module_main() {
@@ -80,6 +156,18 @@ module_main() {
     cfg_set LLAMA_MODEL "$m"
   fi
   log_info "Model: $(cfg_get LLAMA_MODEL)"
+
+  # Non-interactive (restore): trust the config verbatim, regenerate the
+  # template, write the env file, restart if the service exists.
+  if [[ -n "${NONINTERACTIVE:-}" ]]; then
+    log_info "Non-interactive: ctx=$(cfg_get LLAMA_CTX 8192) ngl=$(cfg_get LLAMA_NGL 999) host=$(cfg_get LLAMA_HOST 0.0.0.0):$(cfg_get LLAMA_PORT 8080) (from config)"
+    render_llama_env
+    printf '\n%s  Resulting command:%s\n    %s\n\n' "$C_BOLD" "$C_RST" "$(_cfg_cmdline_preview)" >&2
+    if systemctl list-unit-files 2>/dev/null | grep -q '^llama-server.service'; then
+      run systemctl restart llama-server && log_ok "Restarted llama-server."
+    fi
+    return 0
+  fi
 
   local budget; budget="$(gpu_budget_gb)"
   local ctx ngl host port apikey extra
@@ -112,6 +200,14 @@ module_main() {
       apikey="$(ui_password "API key (leave blank to auto-skip)")" || apikey=""
       [[ -n "$apikey" ]] && extra="${extra:+$extra }--api-key ${apikey}"
     fi
+  fi
+
+  # Permissive chat template — needed for agentic clients (OpenCode, etc.) that
+  # send consecutive same-role turns, which the stock template rejects.
+  if ui_yesno "Regenerate a permissive chat template from the model (fixes agentic clients' 'roles must alternate' error, keeps tool-calls)?"; then
+    cfg_set CHAT_TEMPLATE_FIXUP 1
+  else
+    cfg_set CHAT_TEMPLATE_FIXUP 0
   fi
 
   cfg_set LLAMA_CTX "$ctx"

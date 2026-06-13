@@ -57,6 +57,58 @@ sudo ./setup.sh status              # what's installed / configured
 sudo ./setup.sh uninstall all       # reverse it
 ```
 
+## Reproducible restore — one config, the whole stack
+
+The config file is the **single source of truth**. Once you've configured a
+machine, the same `config.conf` rebuilds it from scratch on a fresh Ubuntu —
+**no artifacts are committed to this repo**, and nothing is prepared by hand.
+
+```bash
+# On a brand-new Ubuntu 26.04, with your config.conf in place:
+sudo ./setup.sh restore
+```
+
+A ready-made profile ships in [`config.example.conf`](config.example.conf) — the
+verified **RTX 5080 + Devstral-Small-2-24B @ 64k** setup. It's optional; copy it,
+set your own API key, and restore:
+
+```bash
+sudo cp config.example.conf /etc/setup-ubuntu-ai/config.conf
+sudoedit /etc/setup-ubuntu-ai/config.conf      # set REPLACE_WITH_YOUR_API_KEY
+sudo ./setup.sh restore
+```
+
+`restore` walks the full chain **unattended** — drivers → llama.cpp → model →
+runtime → service → doctor — reading every decision from the config:
+
+- **GPU profile / driver** — `HW_*`, `NVIDIA_DRIVER_PKG`, `NVIDIA_POWER_LIMIT_W`.
+- **Exact model** — `MODEL_REPO` + `MODEL_FILE` are downloaded straight from
+  Hugging Face (the interactive `model` browser saves these for you the first
+  time you pick a model, so a later `restore` re-fetches the identical file).
+- **Runtime** — `LLAMA_CTX`, `LLAMA_NGL`, `LLAMA_HOST/PORT`, `LLAMA_EXTRA_ARGS`
+  (flash-attention, KV-cache type, API key…).
+- **Chat template** — when `CHAT_TEMPLATE_FIXUP="1"`, the template is
+  **regenerated from the downloaded GGUF**: the embedded chat template is
+  extracted and its `raise_exception(…)` validation guards are neutralised. This
+  fixes agentic clients (OpenCode, etc.) that legitimately send consecutive
+  same-role turns and otherwise hit *"roles must alternate"*, while keeping all
+  tool-call (`[TOOL_CALLS]`/`[ARGS]`) handling intact. The generated file lives
+  at `/etc/setup-ubuntu-ai/<model>-template.jinja` — derived, never committed.
+
+### Moving to a new machine (same external GPU)
+
+`restore` is built for exactly this: the **same external eGPU on a different
+host**. Hardware is re-detected on the new box, and any absolute paths the
+config carried from the old host (e.g. `/home/<old-user>/models`) are
+automatically **re-homed** to the new machine's user — so a different username
+is fine. Stale `CUDA_OK` / `SERVICE_INSTALLED` flags are harmless: every phase
+re-runs unconditionally and overwrites them.
+
+The only thing to carry to the new machine is `config.conf` (and, for gated
+models, an `hf auth login` as your user). A NVIDIA Secure-Boot/MOK enrolment
+still requires a reboot; continue with `sudo ./setup.sh resume` afterwards (or
+use Ubuntu's pre-signed modules to avoid the console step).
+
 ## Flags
 
 | Flag | Effect |
@@ -74,8 +126,9 @@ sudo ./setup.sh uninstall all       # reverse it
 |------|---------|
 | `~/llama.cpp` | source + build (owned by you; rebuild without sudo) |
 | `~/models` | downloaded GGUF models |
-| `/etc/setup-ubuntu-ai/config.conf` | persisted state (the source of truth) |
-| `/etc/setup-ubuntu-ai/llama-server.env` | service runtime settings |
+| `/etc/setup-ubuntu-ai/config.conf` | persisted state (**the source of truth** — carry this to reproduce a machine) |
+| `/etc/setup-ubuntu-ai/llama-server.env` | service runtime settings (generated from the config) |
+| `/etc/setup-ubuntu-ai/<model>-template.jinja` | chat template regenerated from the GGUF (when `CHAT_TEMPLATE_FIXUP=1`) |
 | `/etc/systemd/system/llama-server.service` | the daemon |
 | `/var/log/setup-ubuntu-ai/install.log` | full transcript |
 
@@ -109,6 +162,7 @@ setup.sh            entry point (verbs + menu + dispatch)
 lib/                shared helpers (logging, config, ui, apt, state, …)
 modules/            one file per phase (NN-name.sh, exposes module_main)
 services/           systemd unit + env templates
+config.example.conf known-good RTX 5080 + Devstral profile (optional, for `restore`)
 ```
 
 The `model` step is a **live Hugging Face search** — type a query, pick a repo
