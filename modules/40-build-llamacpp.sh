@@ -4,7 +4,10 @@
 # Builds in the invoking user's home so rebuilds need no sudo.
 # shellcheck source=/dev/null
 
-LLAMACPP_REPO="https://github.com/ggml-org/llama.cpp"
+# Default upstream source. Overridable per-config with LLAMACPP_REPO (e.g. the
+# spiritbuun/buun-llama-cpp fork that adds the TurboQuant `turbo3_tcq` KV cache),
+# and LLAMACPP_REF to pin a branch/tag/commit for reproducibility.
+LLAMACPP_REPO_DEFAULT="https://github.com/ggml-org/llama.cpp"
 
 _lc_backend() {
   case "$(cfg_get HW_VENDOR)" in
@@ -13,6 +16,23 @@ _lc_backend() {
     *)      ui_menu "Backend" "GPU vendor unknown — pick a llama.cpp backend:" \
               cuda "NVIDIA CUDA" vulkan "AMD/Intel Vulkan" cpu "CPU only" ;;
   esac
+}
+
+# _lc_bin_runs BIN — true if the binary actually executes on THIS machine. A
+# build carried over from another host can be present yet crash instantly with
+# SIGILL: GGML_NATIVE bakes the build host's instruction set (e.g. AVX-512) into
+# the binary, so it dies on a CPU that lacks those extensions. The executable
+# bit alone can't catch that — only running it can.
+_lc_bin_runs() {
+  [[ "${DRY_RUN:-0}" == "1" ]] && return 0
+  # A zero-byte or truncated stub from an aborted build is still +x, and the
+  # shell will happily "run" an empty file as an empty script that exits 0 — so
+  # `--version` alone reports success on a broken binary. Require genuine ELF
+  # magic first (systemd's execve rejects the stub with "Exec format error",
+  # status 203; mirror that stricter check here).
+  [[ -s "$1" ]] || return 1
+  [[ "$(LC_ALL=C head -c4 -- "$1" 2>/dev/null)" == $'\177ELF' ]] || return 1
+  "$1" --version >/dev/null 2>&1
 }
 
 _lc_install_deps() {
@@ -40,9 +60,47 @@ _lc_install_deps() {
   esac
 }
 
+# _lc_turbo_intended REPO — true if this build is meant to run TurboQuant KV
+# cache: either the buun-llama-cpp fork (which provides it) or extra args that
+# already request a turbo cache type. Used to gate the CUDA-version guard below.
+_lc_turbo_intended() {
+  local repo="$1" extra; extra="$(cfg_get LLAMA_EXTRA_ARGS)"
+  [[ "$repo" == *buun-llama-cpp* ]] && return 0
+  [[ "$extra" == *turbo* ]] && return 0
+  return 1
+}
+
+# _lc_cuda_turbo_guard — TurboQuant KV cache (turbo3_tcq) emits GIBBERISH on
+# CUDA 13.0 and 13.2; only 13.1 and 13.3 are known-good (per the buun-llama-cpp
+# authors). Catch a bad toolkit BEFORE a long build that would otherwise compile
+# fine and then silently produce garbage at inference time. Returns non-zero to
+# abort in non-interactive runs; interactive runs may override.
+_lc_cuda_turbo_guard() {
+  local ver
+  ver="$(${LC_NVCC:-nvcc} --version 2>/dev/null | sed -n 's/.*release \([0-9]\+\.[0-9]\+\).*/\1/p' | head -1)"
+  if [[ -z "$ver" ]]; then
+    log_warn "Could not read the CUDA version for the TurboQuant guard; proceeding."
+    return 0
+  fi
+  case "$ver" in
+    13.0|13.2)
+      log_error "CUDA ${ver} makes TurboQuant KV cache (turbo3_tcq) output gibberish — use CUDA 13.1 or 13.3."
+      [[ -n "${NONINTERACTIVE:-}" ]] && return 1
+      ui_yesno "Continue building anyway (inference output may be garbage)?" || return 1 ;;
+    *)
+      log_ok "CUDA ${ver} is compatible with TurboQuant KV cache." ;;
+  esac
+  return 0
+}
+
 _lc_cmake_flags() {
   local backend="$1"
-  local -a f=( -S "$LC_DIR" -B "$LC_DIR/build" -DCMAKE_BUILD_TYPE=Release )
+  # Headless inference appliance: build llama-server's API only, NOT the
+  # embedded browser Web UI. Upstream's UI step needs node/npm (or a build-time
+  # Hugging Face asset download) and is a frequent source of breakage on master;
+  # we never serve the UI, so switch it off for a self-contained, robust build.
+  local -a f=( -S "$LC_DIR" -B "$LC_DIR/build" -DCMAKE_BUILD_TYPE=Release
+               -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF )
   case "$backend" in
     cuda)
       f+=( -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="${LC_SM:-120}" -DGGML_CUDA_FA_ALL_QUANTS=ON )
@@ -64,7 +122,10 @@ module_main() {
   [[ -z "$backend" ]] && { log_info "Cancelled."; return 0; }
   LC_DIR="$(cfg_get LLAMACPP_DIR "$INVOKING_HOME/llama.cpp")"
   LC_SM="$(cfg_get HW_SM 120)"
+  LC_REPO="$(cfg_get LLAMACPP_REPO "$LLAMACPP_REPO_DEFAULT")"
+  LC_REF="$(cfg_get LLAMACPP_REF)"
   local bin="$LC_DIR/build/bin/llama-server"
+  local clean=$force   # wipe the build/ tree before configuring (see below)
 
   # Resolve an absolute nvcc so CMake finds it when building as the user.
   if [[ "$backend" == cuda ]]; then
@@ -73,23 +134,66 @@ module_main() {
     [[ -n "$LC_NVCC" ]] && log_info "Using CUDA compiler: $LC_NVCC"
   fi
 
-  log_info "Backend: ${backend}   Source dir: ${LC_DIR}"
+  # Guard a TurboQuant build against the CUDA versions that silently break it.
+  if [[ "$backend" == cuda ]] && _lc_turbo_intended "$LC_REPO"; then
+    _lc_cuda_turbo_guard || { log_error "Aborting: CUDA toolkit incompatible with TurboQuant KV cache."; return 1; }
+  fi
+
+  log_info "Backend: ${backend}   Repo: ${LC_REPO}   Source dir: ${LC_DIR}"
 
   if [[ -x "$bin" && "$(cfg_get LLAMACPP_BACKEND)" == "$backend" && $force -eq 0 ]]; then
-    log_ok "llama.cpp already built ($backend) → $bin"
-    ui_yesno "Pull latest and rebuild?" || return 0
+    if _lc_bin_runs "$bin"; then
+      log_ok "llama.cpp already built ($backend) → $bin"
+      ui_yesno "Pull latest and rebuild?" || return 0
+    else
+      # Present but won't execute → almost always a build carried from another
+      # machine (GGML_NATIVE compiled in CPU instructions this host lacks).
+      # Don't trust it; rebuild on THIS CPU — and from a clean tree, since the
+      # carried-over build/ also holds the old host's CMake cache and stale
+      # generated assets.
+      log_warn "Existing llama-server won't run on this CPU (built on another machine?) — rebuilding clean from source."
+      clean=1
+    fi
   fi
 
   require_space "$INVOKING_HOME" 5 "llama.cpp build"
   _lc_install_deps "$backend" || { log_warn "Dependencies incomplete; aborting build."; return 1; }
 
-  # Clone or update as the human (home-owned tree).
+  # Clone or update as the human (home-owned tree). If an existing checkout
+  # points at a DIFFERENT remote than the configured one (e.g. upstream on disk
+  # but the config now wants the buun fork), re-clone from scratch rather than
+  # trying to pull one repo's history onto another.
   if [[ -d "$LC_DIR/.git" ]]; then
-    narrate "Updating existing checkout."
-    run_as_user git -C "$LC_DIR" pull --ff-only || log_warn "git pull failed; building current checkout."
+    local cur_origin
+    cur_origin="$(run_as_user git -C "$LC_DIR" remote get-url origin 2>/dev/null || true)"
+    if [[ -n "$cur_origin" && "$cur_origin" != "$LC_REPO" ]]; then
+      log_warn "Checkout at ${LC_DIR} tracks ${cur_origin}, but config wants ${LC_REPO} — re-cloning."
+      run_as_user rm -rf "$LC_DIR"
+      narrate "Cloning ${LC_REPO}."
+      run_as_user git clone "$LC_REPO" "$LC_DIR"
+      clean=1
+    else
+      narrate "Updating existing checkout."
+      run_as_user git -C "$LC_DIR" pull --ff-only || log_warn "git pull failed; building current checkout."
+    fi
   else
-    narrate "Cloning llama.cpp."
-    run_as_user git clone "$LLAMACPP_REPO" "$LC_DIR"
+    narrate "Cloning ${LC_REPO}."
+    run_as_user git clone "$LC_REPO" "$LC_DIR"
+  fi
+
+  # Optionally pin a branch/tag/commit for reproducible builds.
+  if [[ -n "$LC_REF" ]]; then
+    narrate "Checking out ref ${LC_REF}."
+    run_as_user git -C "$LC_DIR" fetch --all --tags --quiet 2>/dev/null || true
+    run_as_user git -C "$LC_DIR" checkout "$LC_REF" || log_warn "Could not check out ref ${LC_REF}; building the default branch."
+  fi
+
+  # A forced or moved-machine rebuild starts from a clean build/ tree: the
+  # carried-over directory holds the previous host's CMakeCache (wrong compiler
+  # paths) and half-generated assets that make a reconfigure fail.
+  if (( clean )) && [[ -d "$LC_DIR/build" ]]; then
+    narrate "Removing the stale build/ tree for a clean reconfigure."
+    run_as_user rm -rf "$LC_DIR/build"
   fi
 
   # Configure + compile, output streaming live (no hidden progress bar).
@@ -109,6 +213,8 @@ module_main() {
   cfg_set LLAMACPP_DIR "$LC_DIR"
   cfg_set LLAMACPP_BIN "$bin"
   cfg_set LLAMACPP_BACKEND "$backend"
+  cfg_set LLAMACPP_REPO "$LC_REPO"
+  [[ -n "$LC_REF" ]] && cfg_set LLAMACPP_REF "$LC_REF"
   cfg_save
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     log_info "[dry-run] skipping post-build verification of ${bin}."
