@@ -9,6 +9,10 @@ _print_report() {
   [[ -n "$(cfg_get HW_GFX)" ]]     && printf '  %-14s %s\n' "GFX target"  "$(cfg_get HW_GFX)"
   [[ -n "$(cfg_get HW_SM)" ]]      && printf '  %-14s sm_%s\n' "CUDA arch" "$(cfg_get HW_SM)"
   [[ -n "$(cfg_get HW_VRAM_GB)" ]] && printf '  %-14s %s GiB\n' "VRAM"     "$(cfg_get HW_VRAM_GB)"
+  case "$(cfg_get HW_LINK)" in
+    thunderbolt) printf '  %-14s %s\n' "GPU link"   "Thunderbolt / USB4 (PCIe tunnelled, authorized)" ;;
+    pci)         printf '  %-14s %s\n' "GPU link"   "direct PCIe (OcuLink / slot)" ;;
+  esac
   printf '  %-14s %s\n' "CPU"        "$(cfg_get HW_CPU)"
   printf '  %-14s %s GiB\n' "System RAM" "$(cfg_get HW_RAM_GB)"
   printf '  %-14s %s\n' "Inference"   "$(case "$(cfg_get HW_VENDOR)" in
@@ -25,6 +29,10 @@ _print_report() {
 
 module_main() {
   log_step "Detecting hardware"
+  # A Thunderbolt/USB4-attached eGPU is invisible to lspci until the dock is
+  # authorized; an OcuLink/slot card is already on the bus. Bring whichever is
+  # present online *before* scanning, so detection is transport-agnostic.
+  ensure_egpu_online
   narrate "Reading lspci device IDs and /proc/cpuinfo to pick the right driver + backend."
   detect_hardware
 

@@ -14,13 +14,15 @@ _lspci_lines() {
 }
 
 # detect_hardware — sets globals + CFG keys: HW_VENDOR HW_MODEL HW_GFX HW_SM
-# HW_VRAM_GB. Returns 0 always (falls back to 'unknown' / manual pick).
+# HW_VRAM_GB HW_LINK. Returns 0 always (falls back to 'unknown' / manual pick).
+# NOTE: this is read-only; bringing a Thunderbolt eGPU onto the bus first is the
+# job of ensure_egpu_online() (lib/thunderbolt.sh), called by the detect step.
 detect_hardware() {
   local pci cpu
   pci="$(_lspci_lines)"
   cpu="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//')"
 
-  HW_VENDOR="unknown"; HW_MODEL="Unrecognized GPU"; HW_GFX=""; HW_SM=""; HW_VRAM_GB=""
+  HW_VENDOR="unknown"; HW_MODEL="Unrecognized GPU"; HW_GFX=""; HW_SM=""; HW_VRAM_GB=""; HW_LINK=""
 
   # --- NVIDIA RTX 50-series / Blackwell (all sm_120) ---
   # The whole consumer Blackwell family shares CUDA arch sm_120; only the model
@@ -57,10 +59,25 @@ detect_hardware() {
   fi
 
   # If nvidia-smi is already present, trust it for an accurate VRAM figure.
+  # On a laptop/host with BOTH an internal dGPU and an external eGPU, more than
+  # one NVIDIA card is listed — match the one we actually picked (the eGPU, by
+  # PCI bus id) instead of blindly taking the first, which would size models to
+  # the wrong card's VRAM.
   if [[ "$HW_VENDOR" == "nvidia" ]] && have nvidia-smi; then
-    local mib
-    mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc '0-9')"
+    local mib="" want; want="$(gpu_pci_addr)"; want="${want#0000:}"   # e.g. 31:00.0
+    if [[ -n "$want" ]]; then
+      mib="$(nvidia-smi --query-gpu=pci.bus_id,memory.total --format=csv,noheader,nounits 2>/dev/null \
+             | awk -v w="${want^^}" 'index(toupper($0), w) {print $NF; exit}' | tr -dc '0-9')"
+    fi
+    # Fall back to the first GPU when the bus id could not be matched.
+    [[ -z "$mib" ]] && mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc '0-9')"
     [[ -n "$mib" ]] && HW_VRAM_GB="$(( (mib + 512) / 1024 ))"
+  fi
+
+  # How is the GPU attached — Thunderbolt-tunnelled or a direct PCIe link
+  # (OcuLink / slot)? Best-effort; only meaningful once a GPU is on the bus.
+  if [[ "$HW_VENDOR" == "nvidia" || "$HW_VENDOR" == "amd" ]]; then
+    HW_LINK="$(gpu_link_kind "$(gpu_pci_addr)")"
   fi
 
   HW_CPU="$cpu"
@@ -71,9 +88,10 @@ detect_hardware() {
   cfg_set HW_GFX     "$HW_GFX"
   cfg_set HW_SM      "$HW_SM"
   cfg_set HW_VRAM_GB "$HW_VRAM_GB"
+  cfg_set HW_LINK    "$HW_LINK"
   cfg_set HW_CPU     "$HW_CPU"
   cfg_set HW_RAM_GB  "$HW_RAM_GB"
-  log_debug "Detected vendor=$HW_VENDOR model=$HW_MODEL gfx=$HW_GFX sm=$HW_SM vram=$HW_VRAM_GB"
+  log_debug "Detected vendor=$HW_VENDOR model=$HW_MODEL gfx=$HW_GFX sm=$HW_SM vram=$HW_VRAM_GB link=$HW_LINK"
   return 0
 }
 

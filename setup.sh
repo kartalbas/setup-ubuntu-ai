@@ -13,7 +13,7 @@ declare -ga SCRIPT_ARGS=("$@")
 export REPO_ROOT SCRIPT_PATH
 
 # ---- source the library (order matters) ------------------------------------
-for _lib in log core fs config ui version distro privilege apt state hardware; do
+for _lib in log core fs config ui version distro privilege apt state thunderbolt hardware; do
   # shellcheck source=/dev/null
   . "$REPO_ROOT/lib/${_lib}.sh"
 done
@@ -170,6 +170,10 @@ cmd_status() {
   printf '  RAM         : %s GiB\n' "$(cfg_get HW_RAM_GB '?')"
   printf '  GPU vendor  : %s\n' "$(cfg_get HW_VENDOR '?')"
   printf '  GPU model   : %s\n' "$(cfg_get HW_MODEL '?')"
+  case "$(cfg_get HW_LINK)" in
+    thunderbolt) printf '  GPU link    : Thunderbolt / USB4 (PCIe tunnelled)\n' ;;
+    pci)         printf '  GPU link    : direct PCIe (OcuLink / slot)\n' ;;
+  esac
   printf '  GPU budget  : %s GiB\n' "$(gpu_budget_gb)"
   printf '\n%s%s── Stack ──%s\n' "$C_BOLD" "$C_CYAN" "$C_RST"
   printf '  Driver      : %s\n' "$(_driver_summary)"

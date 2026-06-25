@@ -8,8 +8,47 @@ SVC_NAME="llama-server"
 SVC_UNIT="/etc/systemd/system/${SVC_NAME}.service"
 SVC_ENV="/etc/setup-ubuntu-ai/llama-server.env"
 
+# Map a target GPU PCI address to its CUDA index under CUDA_DEVICE_ORDER=
+# PCI_BUS_ID (devices ordered by ascending bus id). Passive — reads sysfs only,
+# never nvidia-smi — so it cannot poke a flaky eGPU link. Echoes the index.
+_svc_cuda_index() {
+  local target="$1" d addr i=0
+  for d in /sys/bus/pci/devices/*/; do
+    [[ "$(cat "$d/vendor" 2>/dev/null)" == "0x10de" ]] || continue
+    [[ "$(cat "$d/class"  2>/dev/null)" == 0x030* ]]  || continue
+    addr="$(basename "$d")"
+    [[ "$addr" == "$target" ]] && { printf '%s' "$i"; return 0; }
+    ((i++)) || true
+  done
+  return 1
+}
+
+# Emit CUDA pin env lines for the configured target GPU. LLAMA_GPU:
+#   all / unset   -> no pin (llama.cpp uses every visible GPU)
+#   egpu          -> the detected external GPU (gpu_pci_addr, prefers removable)
+#   0000:bb:dd.f  -> that explicit PCI address
+# Pinning to a single card avoids llama.cpp splitting the model across an
+# unwanted second GPU, and keeps the choice reproducible across reboots.
+_svc_gpu_pin_lines() {
+  local pin target idx
+  pin="$(cfg_get LLAMA_GPU all)"
+  [[ "$pin" == all || -z "$pin" ]] && return 0
+  case "$pin" in
+    egpu) target="$(gpu_pci_addr 2>/dev/null)" ;;
+    *)    target="$pin" ;;
+  esac
+  [[ -n "$target" ]] || return 0
+  if idx="$(_svc_cuda_index "$target")"; then
+    log_info "Pinning llama-server to GPU ${target} (CUDA index ${idx})."
+    printf 'CUDA_DEVICE_ORDER=PCI_BUS_ID\nCUDA_VISIBLE_DEVICES=%s\n' "$idx"
+  else
+    log_warn "Could not map LLAMA_GPU='${pin}' to a CUDA index; leaving all GPUs visible."
+  fi
+}
+
 _svc_render_env() {
-  local content
+  local content pin_lines
+  pin_lines="$(_svc_gpu_pin_lines)"
   content="$(cat <<EOF
 # Managed by setup-ubuntu-ai — edit then: systemctl restart ${SVC_NAME}
 LLAMA_MODEL=$(cfg_get LLAMA_MODEL)
@@ -21,6 +60,7 @@ LLAMA_NGL=$(cfg_get LLAMA_NGL 999)
 LLAMA_EXTRA_ARGS=$(cfg_get LLAMA_EXTRA_ARGS "--flash-attn on")
 EOF
 )"
+  [[ -n "$pin_lines" ]] && content+=$'\n'"$pin_lines"
   ensure_dir "$(dirname "$SVC_ENV")" 0755
   show_diff "$SVC_ENV" <<<"$content" || true
   printf '%s\n' "$content" | atomic_write "$SVC_ENV"
@@ -42,6 +82,17 @@ _svc_preflight() {
   bin="$(cfg_get LLAMACPP_BIN "$INVOKING_HOME/llama.cpp/build/bin/llama-server")"
   model="$(cfg_get LLAMA_MODEL)"
   [[ -x "$bin" ]]   || $fatal "llama-server binary not found ($bin). Run 'build' first."
+  # A binary can be present yet unusable: SIGILL on this CPU (GGML_NATIVE baked
+  # in another host's instruction set), or a zero-byte/truncated stub from an
+  # aborted build. The shell runs an empty +x file as an empty script exiting 0,
+  # so `--version` alone is fooled — require real ELF magic first, mirroring the
+  # "Exec format error" (status 203) systemd would otherwise crash-loop on.
+  if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    if [[ ! -s "$bin" ]] || [[ "$(LC_ALL=C head -c4 -- "$bin" 2>/dev/null)" != $'\177ELF' ]] \
+       || ! "$bin" --version >/dev/null 2>&1; then
+      $fatal "llama-server at ${bin} is not a working binary (truncated build, or built on another machine?). Run 'build' to recompile here."
+    fi
+  fi
   [[ -n "$model" ]] || $fatal "No model selected. Run 'model' then 'configure' first."
   [[ -e "$model" ]] || log_warn "Configured model file does not exist yet: $model"
 }

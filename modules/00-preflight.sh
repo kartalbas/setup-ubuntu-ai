@@ -18,6 +18,12 @@ module_main() {
   have curl  || boot+=(curl)
   have gpg   || boot+=(gnupg)
   have git   || boot+=(git)
+  # Thunderbolt/USB4 box? 'bolt' (boltctl) is needed to authorize a TB-attached
+  # eGPU dock so its tunnelled PCIe GPU shows up. OcuLink/slot links need nothing.
+  if _tb_domains_present && ! have boltctl; then
+    narrate "Thunderbolt fabric detected — installing 'bolt' to authorize the eGPU dock."
+    boot+=(bolt)
+  fi
   if (( ${#boot[@]} )); then
     narrate "Installing base tools: ${boot[*]}"
     apt_install "${boot[@]}"
