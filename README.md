@@ -13,6 +13,13 @@ Supported hardware:
 
 It also degrades gracefully for other NVIDIA/AMD GPUs (manual vendor pick).
 
+> ⭐ **Highlight — Qwen3.6-27B at 100k context on a 16 GB RTX 5080.** This model
+> was effectively *not* runnable at long context on a 16 GB card; people bought a
+> 24 GB GPU (RTX 4090 / 5090) just to get the context. With the **TurboQuant**
+> KV-cache profile this installer ships, it now fits — engine built for you,
+> one config, `sudo ./setup.sh restore`. See
+> [**Run Qwen3.6-27B at 100k on a 16 GB RTX 5080**](#run-qwen36-27b-at-100k-context-on-a-16-gb-rtx-5080--turboquant-kv-cache).
+
 ## Design principles
 
 - **Verbose by default.** Every state-changing command is echoed in full
@@ -109,6 +116,119 @@ models, an `hf auth login` as your user). A NVIDIA Secure-Boot/MOK enrolment
 still requires a reboot; continue with `sudo ./setup.sh resume` afterwards (or
 use Ubuntu's pre-signed modules to avoid the console step).
 
+## Run Qwen3.6-27B at 100k context on a 16 GB RTX 5080 — TurboQuant KV cache
+
+**The headline:** Qwen3.6-27B was, for practical purposes, *not* runnable at long
+context on a 16 GB card. The IQ4_XS weights alone are ~13.3 GiB resident on the
+GPU, and a 100k-token KV cache in the usual `f16`/`q8_0` formats blows straight
+past the ~2 GiB that's left — so people bought a 24 GB card (RTX 4090 / 5090)
+*just to get the context*. **TurboQuant changes that:** with Trellis-Coded
+Quantization (TCQ) for the KV cache, the 27B runs at the **full 100k context
+inside 16 GB**, on an RTX 5080. This installer ships that exact setup as a
+ready-made profile and **builds the engine for you**.
+
+### Why it didn't fit before
+
+- IQ4_XS weights: **~13.3 GiB** resident on the GPU (`--n-gpu-layers 999`).
+- Qwen3.6-27B is a **hybrid** model — gated-delta-net / linear-attention layers
+  plus a recurrent state cache — so its KV + state footprint is heavy.
+- A 100k KV cache at `f16`/`q8_0` needs several GiB; there is no room next to the
+  weights in 16 GiB → CUDA out-of-memory.
+
+### What makes it fit: TurboQuant (TCQ) KV cache
+
+[buun-llama-cpp](https://github.com/spiritbuun/buun-llama-cpp) is a fork of
+llama.cpp that adds **Trellis-Coded Quantization** KV-cache types (`turbo3_tcq`),
+compressing the cache ~2–3× at quality that matches or beats `f16`. Both K and V
+on `turbo3_tcq` is what lets the 100k cache live in the ~2 GiB left after the
+weights load.
+
+### Use it — the whole stack, from one config
+
+The profile [`config.qwen3.6-27b-turbo.conf`](config.qwen3.6-27b-turbo.conf)
+encodes both *the build* (which engine) and *the run* (which model + args):
+
+```bash
+sudo cp config.qwen3.6-27b-turbo.conf /etc/setup-ubuntu-ai/config.conf
+sudoedit /etc/setup-ubuntu-ai/config.conf      # set your --api-key
+sudo ./setup.sh restore
+```
+
+`restore` reads `LLAMACPP_REPO` and **builds the buun fork automatically** (into
+its own `~/buun-llama-cpp`, leaving any upstream `~/llama.cpp` untouched),
+downloads the exact GGUF (`MODEL_REPO`/`MODEL_FILE`), and starts the service with
+the TurboQuant runtime args — nothing prepared by hand.
+
+### Config-driven build source
+
+The `build` step is no longer hard-wired to upstream:
+
+- **`LLAMACPP_REPO`** — git URL to build (default: upstream `ggml-org/llama.cpp`;
+  the profile points it at the buun fork). A checkout that tracks a *different*
+  remote is detected and re-cloned automatically, so switching engines is clean.
+- **`LLAMACPP_REF`** — optional branch/tag/commit pin for a reproducible build.
+
+### The runtime recipe — and why each knob matters
+
+`LLAMA_EXTRA_ARGS` in the profile is the **measured-working** command on a 16 GB
+card. Each flag earns its place:
+
+```
+--flash-attn on --parallel 1 \
+--cache-type-k turbo3_tcq --cache-type-v turbo3_tcq \
+--no-mmap --fit off \
+--temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0
+```
+
+- **Both** caches on `turbo3_tcq`. The community's "leave K on `q8_0` for a touch
+  more quality" tweak is real, but a `q8_0` K cache is **far larger** and OOMs at
+  100k on 16 GB. Use both-turbo here.
+- **`--parallel 1`.** Because the model is hybrid, its recurrent **rs-cache scales
+  with `--parallel`** — the auto default (`n_parallel=4`) quadruples it and OOMs.
+  Pin it to 1.
+- **`--no-mmap`** keeps weights pinned in VRAM; **`--fit off`** silences the
+  auto-offload warning since every knob here is already explicit.
+
+### ⚠️ CUDA 13.1 or 13.3 only
+
+TurboQuant's `turbo3_tcq` produces **gibberish output on CUDA 13.0 and 13.2** —
+only **13.1 and 13.3** are known-good. The `build` step **guards this** and, when
+the configured engine is the fork (or the args request a turbo cache), refuses to
+build on a bad toolkit (overridable interactively, hard-fails a `restore`).
+
+### Hard limit & failure mode (read this before you raise the context)
+
+- **~15.2 / 16.3 GiB** used at 100k — that's the validated ceiling for this model
+  on a 16 GB card. Raising `LLAMA_CTX` past 100k OOMs.
+- The fork **SIGSEGVs on a failed `cudaMalloc`** (it crash-loops the service)
+  instead of erroring cleanly — so an over-budget config *looks like a crash, not
+  an OOM message*. **If `llama-server` dies a couple of seconds after "loading
+  model", you are over the VRAM budget — lower `LLAMA_CTX`** (or check
+  `journalctl -u llama-server` for `out of memory`).
+
+### Measured — RTX 5080 (16 GB), `turbo3_tcq` KV, flash-attention
+
+| Context depth | Generation | Prompt processing |
+|---|---|---|
+| 0    | **52.8 tok/s** | 2152 tok/s |
+| 16k  | 49.4 tok/s | 1871 tok/s |
+| 64k  | **46.1 tok/s** | 1228 tok/s |
+
+Generation stays nearly flat across depth (≈53 → 46 tok/s from 0 → 64k). **Prompt
+caching works**, too: the TCQ-compressed cache still does prefix reuse, so a
+repeated prefix is served from cache (~4× faster prefill) rather than reprocessed.
+
+### Use it from OpenCode (agentic coding)
+
+A ready client config ships in
+[`opencode.example.json`](opencode.example.json). Copy it to `~/opencode.json`
+(or `~/.config/opencode/opencode.json`), set your API key and the server's
+address (`127.0.0.1` locally, or the host's LAN IP), and OpenCode talks to the
+local model. Because Qwen3.6 is a **reasoning** model, the config sets
+`interleaved.field = "reasoning_content"` and `reasoning: true` so the thinking
+stream is parsed correctly, plus `tool_call: true` for agentic tool use. The
+model id must match what `llama-server` reports (the GGUF filename).
+
 ## Flags
 
 | Flag | Effect |
@@ -125,6 +245,7 @@ use Ubuntu's pre-signed modules to avoid the console step).
 | Path | Purpose |
 |------|---------|
 | `~/llama.cpp` | source + build (owned by you; rebuild without sudo) |
+| `~/<repo-basename>` e.g. `~/buun-llama-cpp` | a non-default `LLAMACPP_REPO` builds in its own dir, leaving `~/llama.cpp` untouched |
 | `~/models` | downloaded GGUF models |
 | `/etc/setup-ubuntu-ai/config.conf` | persisted state (**the source of truth** — carry this to reproduce a machine) |
 | `/etc/setup-ubuntu-ai/llama-server.env` | service runtime settings (generated from the config) |
@@ -152,6 +273,17 @@ during `configure`; consider doing so, or change the host to `127.0.0.1`.
   GPU can borrow (via GRUB `ttm.pages_limit` + a modprobe drop-in). The firmware
   UMA carve-out itself is a BIOS setting and is not changed from Linux. Requires
   a reboot.
+- **eGPU transport (OcuLink *or* Thunderbolt).** The external GPU is brought
+  onto the bus automatically, whichever way it is attached. **OcuLink** (or a
+  slot riser) is a direct PCIe link — the card is on the bus at power-on, so
+  nothing special happens. **Thunderbolt 4 / USB4** tunnels PCIe, and the dock
+  must be *authorized* by `bolt` before its GPU appears in `lspci`; on a fresh
+  box with a `user`/`secure` TB security level it would otherwise stay invisible.
+  `detect` (and `restore`) run `boltctl enroll --policy auto` on the connected
+  dock first — installing the `bolt` package if needed — so the same config
+  rebuilds the stack over either link. The detected transport is shown in the
+  hardware report and `status` as **GPU link**. Set `TB_AUTHORIZE="no"` in the
+  config to opt out of automatic authorization.
 - **Models** are downloaded with the Hugging Face CLI (`hf` / `huggingface-cli`,
   installed via `pipx`). Gated models need `hf auth login` as your user first.
 
@@ -163,6 +295,8 @@ lib/                shared helpers (logging, config, ui, apt, state, …)
 modules/            one file per phase (NN-name.sh, exposes module_main)
 services/           systemd unit + env templates
 config.example.conf known-good RTX 5080 + Devstral profile (optional, for `restore`)
+config.qwen3.6-27b-turbo.conf  RTX 5080 + Qwen3.6-27B @ 100k via the buun-llama-cpp TurboQuant fork
+opencode.example.json  ready OpenCode client config for the served model (set your API key)
 ```
 
 The `model` step is a **live Hugging Face search** — type a query, pick a repo
@@ -172,7 +306,8 @@ sizes). No hard-coded model list.
 ## Requirements
 
 Ubuntu 24.04+ (tested target 26.04), `sudo`, internet access. `whiptail`,
-`pciutils`, `curl`, `gnupg`, `git` are installed automatically if missing.
+`pciutils`, `curl`, `gnupg`, `git` are installed automatically if missing (plus
+`bolt` on Thunderbolt/USB4 machines, to authorize a TB-attached eGPU dock).
 
 ## Field notes: RTX 5090 in an AG03 OcuLink eGPU dock
 
