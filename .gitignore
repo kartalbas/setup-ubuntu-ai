@@ -1,3 +1,6 @@
 *.bak.*
 *.tmp
 *.log
+
+# scratch workspace (never committed)
+.work/

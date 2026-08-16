@@ -9,8 +9,8 @@
         "apiKey": "REPLACE_WITH_YOUR_API_KEY"
       },
       "models": {
-        "qwen3.6-27b-IQ4_XS-pure.gguf": {
-          "name": "Qwen3.6 27B (IQ4_XS, 100k TurboQuant)",
+        "qwen3.8-27b-IQ4_XS-pure.gguf": {
+          "name": "Qwen3.8 27B (IQ4_XS, 100k VBR)",
           "interleaved": {
             "field": "reasoning_content"
           },
@@ -25,5 +25,5 @@
       }
     }
   },
-  "model": "local-ai/qwen3.6-27b-IQ4_XS-pure.gguf"
+  "model": "local-ai/qwen3.8-27b-IQ4_XS-pure.gguf"
 }

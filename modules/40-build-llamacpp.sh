@@ -5,7 +5,7 @@
 # shellcheck source=/dev/null
 
 # Default upstream source. Overridable per-config with LLAMACPP_REPO (e.g. the
-# spiritbuun/buun-llama-cpp fork that adds the TurboQuant `turbo3_tcq` KV cache),
+# spiritbuun/buun-llama-cpp fork that adds the TurboQuant/VBR KV cache),
 # and LLAMACPP_REF to pin a branch/tag/commit for reproducibility.
 LLAMACPP_REPO_DEFAULT="https://github.com/ggml-org/llama.cpp"
 
@@ -60,17 +60,17 @@ _lc_install_deps() {
   esac
 }
 
-# _lc_turbo_intended REPO — true if this build is meant to run TurboQuant KV
-# cache: either the buun-llama-cpp fork (which provides it) or extra args that
-# already request a turbo cache type. Used to gate the CUDA-version guard below.
+# _lc_turbo_intended REPO — true if this build is meant to run the TurboQuant /
+# VBR KV cache: either the buun-llama-cpp fork (which provides it) or extra args
+# that already request a turbo/vbr cache type. Gates the CUDA-version guard below.
 _lc_turbo_intended() {
   local repo="$1" extra; extra="$(cfg_get LLAMA_EXTRA_ARGS)"
   [[ "$repo" == *buun-llama-cpp* ]] && return 0
-  [[ "$extra" == *turbo* ]] && return 0
+  [[ "$extra" == *turbo* || "$extra" == *vbr* ]] && return 0
   return 1
 }
 
-# _lc_cuda_turbo_guard — TurboQuant KV cache (turbo3_tcq) emits GIBBERISH on
+# _lc_cuda_turbo_guard — the TurboQuant/VBR KV codecs emit GIBBERISH on
 # CUDA 13.0 and 13.2; only 13.1 and 13.3 are known-good (per the buun-llama-cpp
 # authors). Catch a bad toolkit BEFORE a long build that would otherwise compile
 # fine and then silently produce garbage at inference time. Returns non-zero to
@@ -84,7 +84,7 @@ _lc_cuda_turbo_guard() {
   fi
   case "$ver" in
     13.0|13.2)
-      log_error "CUDA ${ver} makes TurboQuant KV cache (turbo3_tcq) output gibberish — use CUDA 13.1 or 13.3."
+      log_error "CUDA ${ver} makes the TurboQuant/VBR KV codecs output gibberish — use CUDA 13.1 or 13.3."
       [[ -n "${NONINTERACTIVE:-}" ]] && return 1
       ui_yesno "Continue building anyway (inference output may be garbage)?" || return 1 ;;
     *)

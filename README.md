@@ -13,12 +13,11 @@ Supported hardware:
 
 It also degrades gracefully for other NVIDIA/AMD GPUs (manual vendor pick).
 
-> ⭐ **Highlight — Qwen3.6-27B at 100k context on a 16 GB RTX 5080.** This model
-> was effectively *not* runnable at long context on a 16 GB card; people bought a
-> 24 GB GPU (RTX 4090 / 5090) just to get the context. With the **TurboQuant**
-> KV-cache profile this installer ships, it now fits — engine built for you,
-> one config, `sudo ./setup.sh restore`. See
-> [**Run Qwen3.6-27B at 100k on a 16 GB RTX 5080**](#run-qwen36-27b-at-100k-context-on-a-16-gb-rtx-5080--turboquant-kv-cache).
+> ⭐ **Highlight — Qwen3.8-27B at 100k context on a 16 GB RTX 5080.** A 27B-class
+> model people bought a 24 GB GPU (RTX 4090 / 5090) just to run at long context.
+> With the **VBR** (variable-bit-rate) KV-cache profile this installer ships, it
+> fits in 16 GB — engine built for you, one config, `sudo ./setup.sh restore`. See
+> [**Run Qwen3.8-27B at 100k on a 16 GB RTX 5080**](#run-qwen38-27b-at-100k-context-on-a-16-gb-rtx-5080--vbr-kv-cache).
 
 ## Design principles
 
@@ -116,40 +115,43 @@ models, an `hf auth login` as your user). A NVIDIA Secure-Boot/MOK enrolment
 still requires a reboot; continue with `sudo ./setup.sh resume` afterwards (or
 use Ubuntu's pre-signed modules to avoid the console step).
 
-## Run Qwen3.6-27B at 100k context on a 16 GB RTX 5080 — TurboQuant KV cache
+## Run Qwen3.8-27B at 100k context on a 16 GB RTX 5080 — VBR KV cache
 
-**The headline:** Qwen3.6-27B was, for practical purposes, *not* runnable at long
-context on a 16 GB card. The IQ4_XS weights alone are ~13.3 GiB resident on the
-GPU, and a 100k-token KV cache in the usual `f16`/`q8_0` formats blows straight
-past the ~2 GiB that's left — so people bought a 24 GB card (RTX 4090 / 5090)
-*just to get the context*. **TurboQuant changes that:** with Trellis-Coded
-Quantization (TCQ) for the KV cache, the 27B runs at the **full 100k context
-inside 16 GB**, on an RTX 5080. This installer ships that exact setup as a
-ready-made profile and **builds the engine for you**.
+**The headline:** a 27B-class model at the **full 100k context inside 16 GB**, on
+an RTX 5080. The IQ4_XS weights alone are ~13.5 GiB resident on the GPU, and a
+100k-token KV cache in the usual `f16`/`q8_0` formats blows straight past the
+~2 GiB that's left — so people bought a 24 GB card (RTX 4090 / 5090) *just to get
+the context*. **VBR changes that:** a variable-bit-rate KV cache keeps quality
+high at short context and compresses down to fit at full depth, automatically.
+This installer ships that exact setup as a ready-made profile and **builds the
+engine for you**.
 
 ### Why it didn't fit before
 
-- IQ4_XS weights: **~13.3 GiB** resident on the GPU (`--n-gpu-layers 999`).
-- Qwen3.6-27B is a **hybrid** model — gated-delta-net / linear-attention layers
-  plus a recurrent state cache — so its KV + state footprint is heavy.
+- IQ4_XS weights: **~13.5 GiB** resident on the GPU (`--n-gpu-layers 999`).
+- Qwen3.8-27B is a **hybrid** model (qwen35 family) — gated-delta-net /
+  linear-attention layers plus a recurrent state cache — heavy KV + state.
 - A 100k KV cache at `f16`/`q8_0` needs several GiB; there is no room next to the
   weights in 16 GiB → CUDA out-of-memory.
 
-### What makes it fit: TurboQuant (TCQ) KV cache
+### What makes it fit: VBR (variable-bit-rate) KV cache
 
 [buun-llama-cpp](https://github.com/spiritbuun/buun-llama-cpp) is a fork of
-llama.cpp that adds **Trellis-Coded Quantization** KV-cache types (`turbo3_tcq`),
-compressing the cache ~2–3× at quality that matches or beats `f16`. Both K and V
-on `turbo3_tcq` is what lets the 100k cache live in the ~2 GiB left after the
-weights load.
+llama.cpp that adds a **VBR** KV cache. VBR runs the TurboQuant codec ladder
+(`f16 → turbo8 → turbo4 → turbo3_tcq → turbo2_tcq → turbo1_tcq`) and, in dynamic
+mode, transcodes individual (layer, K/V) tensors **down the ladder at runtime**
+as the context fills — following a price order *measured for the qwen35 family*.
+Near-f16 quality at short contexts, full-depth capacity at 100k, from one flag
+(`--cache-type-k/v vbr`); the KV VRAM budget is derived automatically from
+whatever is left after the weights, so the 100k cache fits by construction.
 
 ### Use it — the whole stack, from one config
 
-The profile [`config.qwen3.6-27b-turbo.conf`](config.qwen3.6-27b-turbo.conf)
+The profile [`config.qwen3.8-27b-turbo.conf`](config.qwen3.8-27b-turbo.conf)
 encodes both *the build* (which engine) and *the run* (which model + args):
 
 ```bash
-sudo cp config.qwen3.6-27b-turbo.conf /etc/setup-ubuntu-ai/config.conf
+sudo cp config.qwen3.8-27b-turbo.conf /etc/setup-ubuntu-ai/config.conf
 sudoedit /etc/setup-ubuntu-ai/config.conf      # set your --api-key
 sudo ./setup.sh restore
 ```
@@ -157,7 +159,7 @@ sudo ./setup.sh restore
 `restore` reads `LLAMACPP_REPO` and **builds the buun fork automatically** (into
 its own `~/buun-llama-cpp`, leaving any upstream `~/llama.cpp` untouched),
 downloads the exact GGUF (`MODEL_REPO`/`MODEL_FILE`), and starts the service with
-the TurboQuant runtime args — nothing prepared by hand.
+the VBR runtime args — nothing prepared by hand.
 
 ### Config-driven build source
 
@@ -166,57 +168,57 @@ The `build` step is no longer hard-wired to upstream:
 - **`LLAMACPP_REPO`** — git URL to build (default: upstream `ggml-org/llama.cpp`;
   the profile points it at the buun fork). A checkout that tracks a *different*
   remote is detected and re-cloned automatically, so switching engines is clean.
-- **`LLAMACPP_REF`** — optional branch/tag/commit pin for a reproducible build.
+- **`LLAMACPP_REF`** — optional branch/tag/commit pin for a reproducible build
+  (empty = default branch, i.e. always the newest VBR engine on rebuild).
 
 ### The runtime recipe — and why each knob matters
 
-`LLAMA_EXTRA_ARGS` in the profile is the **measured-working** command on a 16 GB
-card. Each flag earns its place:
+`LLAMA_EXTRA_ARGS` in the profile:
 
 ```
 --flash-attn on --parallel 1 \
---cache-type-k turbo3_tcq --cache-type-v turbo3_tcq \
---no-mmap --fit off \
+--cache-type-k vbr --cache-type-v vbr \
+--no-mmap \
 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0
 ```
 
-- **Both** caches on `turbo3_tcq`. The community's "leave K on `q8_0` for a touch
-  more quality" tweak is real, but a `q8_0` K cache is **far larger** and OOMs at
-  100k on 16 GB. Use both-turbo here.
-- **`--parallel 1`.** Because the model is hybrid, its recurrent **rs-cache scales
-  with `--parallel`** — the auto default (`n_parallel=4`) quadruples it and OOMs.
-  Pin it to 1.
-- **`--no-mmap`** keeps weights pinned in VRAM; **`--fit off`** silences the
-  auto-offload warning since every knob here is already explicit.
+- **`--cache-type-k/v vbr`.** Explicit VBR opens the full codec ladder (down to
+  `turbo1_tcq`) so 100k always fits; it enters at `f16` and degrades only under
+  real budget pressure. VBR is also the engine default — this makes it explicit.
+- **`--parallel 1`.** The model is hybrid: its recurrent **rs-cache scales with
+  `--parallel`**, and dynamic VBR needs single-stream KV. The auto default
+  (`n_parallel=4`) quadruples the state and OOMs. Pin it to 1.
+- **`--no-mmap`** keeps weights pinned in VRAM. Note there is **no `--fit off`**:
+  VBR derives its KV budget *from* the fit pass, so fitting must stay on. Flash
+  attention is **required** by VBR (rotated-space KV) and is force-enabled.
 
 ### ⚠️ CUDA 13.1 or 13.3 only
 
-TurboQuant's `turbo3_tcq` produces **gibberish output on CUDA 13.0 and 13.2** —
+The TurboQuant/VBR KV codecs produce **gibberish output on CUDA 13.0 and 13.2** —
 only **13.1 and 13.3** are known-good. The `build` step **guards this** and, when
-the configured engine is the fork (or the args request a turbo cache), refuses to
-build on a bad toolkit (overridable interactively, hard-fails a `restore`).
+the configured engine is the fork (or the args request a turbo/vbr cache), refuses
+to build on a bad toolkit (overridable interactively, hard-fails a `restore`).
 
-### Hard limit & failure mode (read this before you raise the context)
+### VBR at full depth — what to expect
 
-- **~15.2 / 16.3 GiB** used at 100k — that's the validated ceiling for this model
-  on a 16 GB card. Raising `LLAMA_CTX` past 100k OOMs.
-- The fork **SIGSEGVs on a failed `cudaMalloc`** (it crash-loops the service)
-  instead of erroring cleanly — so an over-budget config *looks like a crash, not
-  an OOM message*. **If `llama-server` dies a couple of seconds after "loading
-  model", you are over the VRAM budget — lower `LLAMA_CTX`** (or check
-  `journalctl -u llama-server` for `out of memory`).
+- Dynamic VBR **auto-fits the KV budget**, so 100k fits by construction — it
+  degrades tensor tiers instead of OOMing. Quality drops gracefully with depth;
+  run `llama-server -v` to watch `VBR degrade #…` steps fire.
+- Dynamic VBR **disables prompt-cache / slot state save and context-shift** (KV
+  tiers change at runtime). That's fine for a stateless inference server:
+  generation stops cleanly when the context fills instead of sliding.
+- If the weights plus the floor-tier KV still exceed VRAM, the fork can **SIGSEGV
+  on a failed `cudaMalloc`** rather than erroring cleanly — so lower `LLAMA_CTX`
+  if `llama-server` dies a couple of seconds after "loading model".
 
-### Measured — RTX 5080 (16 GB), `turbo3_tcq` KV, flash-attention
+### Measured — RTX 5080 (16 GB), VBR KV, flash-attention
 
-| Context depth | Generation | Prompt processing |
-|---|---|---|
-| 0    | **52.8 tok/s** | 2152 tok/s |
-| 16k  | 49.4 tok/s | 1871 tok/s |
-| 64k  | **46.1 tok/s** | 1228 tok/s |
-
-Generation stays nearly flat across depth (≈53 → 46 tok/s from 0 → 64k). **Prompt
-caching works**, too: the TCQ-compressed cache still does prefix reuse, so a
-repeated prefix is served from cache (~4× faster prefill) rather than reprocessed.
+- **~56 tok/s** generation at short context (VBR enters at `f16`), Qwen3.8-27B
+  IQ4_XS @ 100k, model fully on GPU.
+- Config-editing accuracy — deeply-nested YAML/JSON *surgical* edits via the
+  [`benchmarks/config_edit_bench.py`](benchmarks/config_edit_bench.py) harness:
+  **3/3 exact** on a 366-field JSON and a 205-field YAML (every other leaf
+  preserved).
 
 ### Use it from OpenCode (agentic coding)
 
@@ -224,7 +226,7 @@ A ready client config ships in
 [`opencode.example.json`](opencode.example.json). Copy it to `~/opencode.json`
 (or `~/.config/opencode/opencode.json`), set your API key and the server's
 address (`127.0.0.1` locally, or the host's LAN IP), and OpenCode talks to the
-local model. Because Qwen3.6 is a **reasoning** model, the config sets
+local model. Because Qwen3.8 is a **reasoning** model, the config sets
 `interleaved.field = "reasoning_content"` and `reasoning: true` so the thinking
 stream is parsed correctly, plus `tool_call: true` for agentic tool use. The
 model id must match what `llama-server` reports (the GGUF filename).
@@ -295,7 +297,7 @@ lib/                shared helpers (logging, config, ui, apt, state, …)
 modules/            one file per phase (NN-name.sh, exposes module_main)
 services/           systemd unit + env templates
 config.example.conf known-good RTX 5080 + Devstral profile (optional, for `restore`)
-config.qwen3.6-27b-turbo.conf  RTX 5080 + Qwen3.6-27B @ 100k via the buun-llama-cpp TurboQuant fork
+config.qwen3.8-27b-turbo.conf  RTX 5080 + Qwen3.8-27B @ 100k via the buun-llama-cpp VBR fork
 opencode.example.json  ready OpenCode client config for the served model (set your API key)
 ```
 
