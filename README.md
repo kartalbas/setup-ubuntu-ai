@@ -163,6 +163,36 @@ its own `~/buun-llama-cpp`, leaving any upstream `~/llama.cpp` untouched),
 downloads the exact GGUF (`MODEL_REPO`/`MODEL_FILE`), and starts the service with
 the VBR runtime args — nothing prepared by hand.
 
+### One command on a fresh server — `deploy.sh`
+
+[`deploy.sh`](deploy.sh) wraps the whole thing: it places a profile (re-homed to
+this machine's user), sets/generates the API key, then runs `restore`.
+
+```bash
+git clone https://github.com/kartalbas/setup-ubuntu-ai && cd setup-ubuntu-ai
+sudo ./deploy.sh qwen3.8-27b-turbo --key MYKEY      # drivers→build→model→service, A→Z
+```
+
+**Skip the ~40-min build on a compatible box** with `--engine`: reuse a prebuilt
+engine instead of compiling. Safe only when the target shares the CPU instruction
+set **and** the GPU arch (`sm_*`) — e.g. the same board with an RTX 5070 Ti
+(Blackwell `sm_120`, 16 GB) instead of a 5080; if the binary won't run here,
+`restore` falls back to a clean source build automatically.
+
+```bash
+# from a working twin (same CPU + sm_120), no repo bloat:
+sudo ./deploy.sh qwen3.8-27b-turbo --engine otherbox:~/buun-llama-cpp
+# or from a portable release tarball you built once:
+sudo ./deploy.sh qwen3.8-27b-turbo --engine buun-engine-sm120-<commit>.tar.zst
+```
+
+Build that portable tarball with [`package-engine.sh`](package-engine.sh) — it
+compiles with **runtime CPU dispatch** (no `-march=native`, so it runs on any
+x86-64-v2+ CPU) and packages `build/`. **Upload it to a GitHub Release, never
+commit it into git** (~0.5 GB, and stale on every fork rebuild). The compiled
+engine is CPU-microarch-, `sm_*`- and CUDA-version-specific — the source build is
+the portable, reproducible default.
+
 ### Config-driven build source
 
 The `build` step is no longer hard-wired to upstream:

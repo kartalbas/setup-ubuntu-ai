@@ -141,6 +141,20 @@ module_main() {
 
   log_info "Backend: ${backend}   Repo: ${LC_REPO}   Source dir: ${LC_DIR}"
 
+  # Prebuilt engine: when LLAMACPP_PREBUILT is set (deploy.sh's --engine path
+  # dropped a ready-made build/ into LC_DIR), trust it and skip the ~40-minute
+  # source compile. Only honoured when the binary ACTUALLY runs on this CPU — a
+  # stub or a wrong-microarch binary (would SIGILL) falls through to a real build,
+  # so a prebuilt from an incompatible host can never silently poison the service.
+  if [[ -n "$(cfg_get LLAMACPP_PREBUILT)" || -n "${LLAMACPP_PREBUILT:-}" ]] && (( force == 0 )); then
+    if _lc_bin_runs "$bin"; then
+      log_ok "Prebuilt engine present and runs here → skipping source build ($bin)."
+      cfg_set LLAMACPP_BIN "$bin"; cfg_set LLAMACPP_BACKEND "$backend"; cfg_save
+      return 0
+    fi
+    log_warn "LLAMACPP_PREBUILT set but ${bin} does not run on this CPU — falling back to a source build."
+  fi
+
   if [[ -x "$bin" && "$(cfg_get LLAMACPP_BACKEND)" == "$backend" && $force -eq 0 ]]; then
     if _lc_bin_runs "$bin"; then
       log_ok "llama.cpp already built ($backend) → $bin"
