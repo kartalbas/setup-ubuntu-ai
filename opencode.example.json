@@ -10,7 +10,7 @@
       },
       "models": {
         "qwen3.8-27b-IQ4_XS-pure.gguf": {
-          "name": "Qwen3.8 27B (IQ4_XS, 100k VBR)",
+          "name": "Qwen3.8 27B (IQ4_XS, 88k VBR ≥3-bit)",
           "interleaved": {
             "field": "reasoning_content"
           },
@@ -18,7 +18,7 @@
           "tool_call": true,
           "temperature": true,
           "limit": {
-            "context": 100000,
+            "context": 90112,
             "output": 32000
           }
         }

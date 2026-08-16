@@ -13,11 +13,12 @@ Supported hardware:
 
 It also degrades gracefully for other NVIDIA/AMD GPUs (manual vendor pick).
 
-> ⭐ **Highlight — Qwen3.8-27B at 100k context on a 16 GB RTX 5080.** A 27B-class
-> model people bought a 24 GB GPU (RTX 4090 / 5090) just to run at long context.
-> With the **VBR** (variable-bit-rate) KV-cache profile this installer ships, it
-> fits in 16 GB — engine built for you, one config, `sudo ./setup.sh restore`. See
-> [**Run Qwen3.8-27B at 100k on a 16 GB RTX 5080**](#run-qwen38-27b-at-100k-context-on-a-16-gb-rtx-5080--vbr-kv-cache).
+> ⭐ **Highlight — Qwen3.8-27B at ~88k context (3-bit KV floor) on a 16 GB RTX
+> 5080.** A 27B-class model people bought a 24 GB GPU (RTX 4090 / 5090) just to run
+> at long context. With the **VBR** (variable-bit-rate) KV-cache profile this
+> installer ships, it fits in 16 GB — engine built for you, one config,
+> `sudo ./setup.sh restore`. See
+> [**Run Qwen3.8-27B at long context on a 16 GB RTX 5080**](#run-qwen38-27b-at-long-context-on-a-16-gb-rtx-5080--vbr-kv-cache).
 
 ## Design principles
 
@@ -115,16 +116,16 @@ models, an `hf auth login` as your user). A NVIDIA Secure-Boot/MOK enrolment
 still requires a reboot; continue with `sudo ./setup.sh resume` afterwards (or
 use Ubuntu's pre-signed modules to avoid the console step).
 
-## Run Qwen3.8-27B at 100k context on a 16 GB RTX 5080 — VBR KV cache
+## Run Qwen3.8-27B at long context on a 16 GB RTX 5080 — VBR KV cache
 
-**The headline:** a 27B-class model at the **full 100k context inside 16 GB**, on
-an RTX 5080. The IQ4_XS weights alone are ~13.5 GiB resident on the GPU, and a
-100k-token KV cache in the usual `f16`/`q8_0` formats blows straight past the
-~2 GiB that's left — so people bought a 24 GB card (RTX 4090 / 5090) *just to get
-the context*. **VBR changes that:** a variable-bit-rate KV cache keeps quality
-high at short context and compresses down to fit at full depth, automatically.
-This installer ships that exact setup as a ready-made profile and **builds the
-engine for you**.
+**The headline:** a 27B-class model at **~88k context inside 16 GB** with a
+guaranteed **3.25-bit KV floor** (or ~100k+ at lower KV bits), on an RTX 5080. The
+IQ4_XS weights alone are ~13.5 GiB resident on the GPU, and a long KV cache in the
+usual `f16`/`q8_0` formats blows straight past the ~2 GiB that's left — so people
+bought a 24 GB card (RTX 4090 / 5090) *just to get the context*. **VBR changes
+that:** a variable-bit-rate KV cache keeps quality high at short context and
+compresses down to fit at full depth, automatically. This installer ships that
+exact setup as a ready-made profile and **builds the engine for you**.
 
 ### Why it didn't fit before
 
@@ -141,9 +142,10 @@ llama.cpp that adds a **VBR** KV cache. VBR runs the TurboQuant codec ladder
 (`f16 → turbo8 → turbo4 → turbo3_tcq → turbo2_tcq → turbo1_tcq`) and, in dynamic
 mode, transcodes individual (layer, K/V) tensors **down the ladder at runtime**
 as the context fills — following a price order *measured for the qwen35 family*.
-Near-f16 quality at short contexts, full-depth capacity at 100k, from one flag
+Near-f16 quality at short contexts, long-context capacity from one flag
 (`--cache-type-k/v vbr`); the KV VRAM budget is derived automatically from
-whatever is left after the weights, so the 100k cache fits by construction.
+whatever is left after the weights. We ship a **3.25-bit floor** (`--vbr-floor
+t3`) so the KV never drops below 3.25 bits/value — measured good to ~88k on 16 GB.
 
 ### Use it — the whole stack, from one config
 
@@ -177,14 +179,16 @@ The `build` step is no longer hard-wired to upstream:
 
 ```
 --flash-attn on --parallel 1 \
---cache-type-k vbr --cache-type-v vbr \
+--cache-type-k vbr --cache-type-v vbr --vbr-floor t3 \
 --no-mmap \
 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0
 ```
 
-- **`--cache-type-k/v vbr`.** Explicit VBR opens the full codec ladder (down to
-  `turbo1_tcq`) so 100k always fits; it enters at `f16` and degrades only under
-  real budget pressure. VBR is also the engine default — this makes it explicit.
+- **`--cache-type-k/v vbr --vbr-floor t3`.** VBR on both sides with a **3.25-bit
+  floor** — the KV never drops below 3.25 bits/value (quality-first). It still
+  enters at `f16` at short context; the floor only clamps the deepest fills. Drop
+  `--vbr-floor` to open the full ladder down to `turbo1_tcq` (1.25-bit) for more
+  context at lower KV quality. VBR itself is the engine default.
 - **`--parallel 1`.** The model is hybrid: its recurrent **rs-cache scales with
   `--parallel`**, and dynamic VBR needs single-stream KV. The auto default
   (`n_parallel=4`) quadruples the state and OOMs. Pin it to 1.
@@ -201,9 +205,9 @@ to build on a bad toolkit (overridable interactively, hard-fails a `restore`).
 
 ### VBR at full depth — what to expect
 
-- Dynamic VBR **auto-fits the KV budget**, so 100k fits by construction — it
-  degrades tensor tiers instead of OOMing. Quality drops gracefully with depth;
-  run `llama-server -v` to watch `VBR degrade #…` steps fire.
+- Dynamic VBR **auto-fits the KV budget** and degrades tensor tiers instead of
+  OOMing. With `--vbr-floor t3` the deepest fills clamp at **3.25 bits/value**
+  (never below); run `llama-server -v` to watch `VBR degrade #…` steps fire.
 - Dynamic VBR **disables prompt-cache / slot state save and context-shift** (KV
   tiers change at runtime). That's fine for a stateless inference server:
   generation stops cleanly when the context fills instead of sliding.
@@ -214,7 +218,13 @@ to build on a bad toolkit (overridable interactively, hard-fails a `restore`).
 ### Measured — RTX 5080 (16 GB), VBR KV, flash-attention
 
 - **~56 tok/s** generation at short context (VBR enters at `f16`), Qwen3.8-27B
-  IQ4_XS @ 100k, model fully on GPU.
+  IQ4_XS, model fully on GPU.
+- **Context ceiling vs KV-quality floor** (measured; weights ~13.5 GB leave a
+  ~1.2 GB KV budget): a guaranteed **3.25-bit floor holds to ~88k** — the shipped
+  default (`--vbr-floor t3`, `LLAMA_CTX=90112`); ~96k OOMs. Higher floors cap
+  sooner (4.125-bit ≈ 75k). Drop the floor and VBR degrades toward 1.25-bit,
+  reaching ~100k+. More context *at ≥3-bit* needs leaner weights (IQ3), trading
+  weight quality for KV room.
 - Config-editing accuracy — deeply-nested YAML/JSON *surgical* edits via the
   [`benchmarks/config_edit_bench.py`](benchmarks/config_edit_bench.py) harness:
   **3/3 exact** on a 366-field JSON and a 205-field YAML (every other leaf
@@ -297,7 +307,7 @@ lib/                shared helpers (logging, config, ui, apt, state, …)
 modules/            one file per phase (NN-name.sh, exposes module_main)
 services/           systemd unit + env templates
 config.example.conf known-good RTX 5080 + Devstral profile (optional, for `restore`)
-config.qwen3.8-27b-turbo.conf  RTX 5080 + Qwen3.8-27B @ 100k via the buun-llama-cpp VBR fork
+config.qwen3.8-27b-turbo.conf  RTX 5080 + Qwen3.8-27B @ ~88k (3-bit floor) via the buun-llama-cpp VBR fork
 opencode.example.json  ready OpenCode client config for the served model (set your API key)
 ```
 
