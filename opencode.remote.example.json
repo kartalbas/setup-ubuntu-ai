@@ -19,7 +19,7 @@
           "temperature": true,
           "limit": {
             "context": 90112,
-            "output": 32000
+            "output": 8192
           }
         }
       }
