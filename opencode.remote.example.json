@@ -1,0 +1,29 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "local-ai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "DigitaCloud LLM (master1)",
+      "options": {
+        "baseURL": "https://master1.digitacloud.app/v1",
+        "apiKey": "REPLACE_WITH_YOUR_SERVICE_TOKEN"
+      },
+      "models": {
+        "qwen3.8-27b-IQ4_XS-pure.gguf": {
+          "name": "Qwen3.8 27B (IQ4_XS, 88k VBR ≥3-bit)",
+          "interleaved": {
+            "field": "reasoning_content"
+          },
+          "reasoning": true,
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 90112,
+            "output": 32000
+          }
+        }
+      }
+    }
+  },
+  "model": "local-ai/qwen3.8-27b-IQ4_XS-pure.gguf"
+}
