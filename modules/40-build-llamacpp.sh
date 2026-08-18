@@ -45,6 +45,8 @@ _lc_relocate_prebuilt() {
   [[ -d "$dir" ]] || return 0
   have patchelf || apt_install patchelf || { log_warn "patchelf unavailable — cannot make the prebuilt engine relocatable."; return 0; }
   while IFS= read -r f; do
+    # $ORIGIN is a literal token resolved by the dynamic loader, not the shell.
+    # shellcheck disable=SC2016
     patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null && n=$((n+1))
   done < <(find "$dir" -maxdepth 1 -type f \( -name 'llama-server' -o -name '*.so*' \))
   (( n > 0 )) && log_info "Made prebuilt engine relocatable (RPATH → \$ORIGIN, ${n} files)."

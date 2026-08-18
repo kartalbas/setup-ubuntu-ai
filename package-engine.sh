@@ -51,6 +51,8 @@ cmake --build "$DIR/build" --config Release -j "$(nproc)"
 # home). Without this the binary dies with "…impl.so: cannot open shared object".
 if command -v patchelf >/dev/null || sudo apt-get install -y -q patchelf 2>/dev/null; then
   echo "▶ Rewriting RPATH → \$ORIGIN (relocatable)…"
+  # $ORIGIN is a literal token resolved by the dynamic loader, not the shell.
+  # shellcheck disable=SC2016
   find "$DIR/build/bin" -maxdepth 1 -type f \( -name 'llama-server' -o -name '*.so*' \) \
     -exec patchelf --set-rpath '$ORIGIN' {} \; 2>/dev/null || true
 else
