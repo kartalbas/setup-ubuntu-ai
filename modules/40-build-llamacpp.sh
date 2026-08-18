@@ -35,6 +35,21 @@ _lc_bin_runs() {
   "$1" --version >/dev/null 2>&1
 }
 
+# _lc_relocate_prebuilt DIR — rewrite the engine's baked build-tree RPATH to
+# $ORIGIN so the binary finds its own .so relative to itself, whatever home path
+# it was built under. A prebuilt copied from a different-home machine otherwise
+# dies with "libllama-server-impl.so: cannot open shared object file" (CMake
+# bakes the absolute build path as RPATH). Makes deploy.sh --engine relocatable.
+_lc_relocate_prebuilt() {
+  local dir="$1/build/bin" f n=0
+  [[ -d "$dir" ]] || return 0
+  have patchelf || apt_install patchelf || { log_warn "patchelf unavailable — cannot make the prebuilt engine relocatable."; return 0; }
+  while IFS= read -r f; do
+    patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null && n=$((n+1))
+  done < <(find "$dir" -maxdepth 1 -type f \( -name 'llama-server' -o -name '*.so*' \))
+  (( n > 0 )) && log_info "Made prebuilt engine relocatable (RPATH → \$ORIGIN, ${n} files)."
+}
+
 _lc_install_deps() {
   local backend="$1"
   narrate "Installing build tools (compiler, cmake, ccache, curl dev)."
@@ -147,6 +162,7 @@ module_main() {
   # stub or a wrong-microarch binary (would SIGILL) falls through to a real build,
   # so a prebuilt from an incompatible host can never silently poison the service.
   if [[ -n "$(cfg_get LLAMACPP_PREBUILT)" || -n "${LLAMACPP_PREBUILT:-}" ]] && (( force == 0 )); then
+    _lc_relocate_prebuilt "$LC_DIR"
     if _lc_bin_runs "$bin"; then
       log_ok "Prebuilt engine present and runs here → skipping source build ($bin)."
       cfg_set LLAMACPP_BIN "$bin"; cfg_set LLAMACPP_BACKEND "$backend"; cfg_save

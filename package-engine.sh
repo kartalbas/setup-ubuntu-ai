@@ -46,6 +46,17 @@ cmake --build "$DIR/build" --config Release -j "$(nproc)"
 
 "$DIR/build/bin/llama-server" --version >/dev/null || { echo "built binary won't run here" >&2; exit 1; }
 
+# Make the engine relocatable: rewrite the absolute build-tree RPATH to $ORIGIN so
+# it runs from any install path (deploy.sh --engine on a machine with a different
+# home). Without this the binary dies with "…impl.so: cannot open shared object".
+if command -v patchelf >/dev/null || sudo apt-get install -y -q patchelf 2>/dev/null; then
+  echo "▶ Rewriting RPATH → \$ORIGIN (relocatable)…"
+  find "$DIR/build/bin" -maxdepth 1 -type f \( -name 'llama-server' -o -name '*.so*' \) \
+    -exec patchelf --set-rpath '$ORIGIN' {} \; 2>/dev/null || true
+else
+  echo "⚠ patchelf missing — tarball will only run at the same home path as this build host." >&2
+fi
+
 TARBALL="$OUT/buun-engine-sm${SM}-${COMMIT}.tar.zst"
 echo "▶ Packaging build/ → $TARBALL"
 if command -v zstd >/dev/null; then

@@ -56,6 +56,35 @@ _nv_secureboot_preflight() {
   cfg_save
 }
 
+# _nv_install_signed_module PKG — under Secure Boot with the 'canonical' strategy,
+# install Ubuntu's Canonical-signed linux-modules-nvidia (trusted by the shim's
+# db, so NO MOK enrollment / console) and drop the DKMS build so the signed .ko is
+# the one that loads. `apt install nvidia-driver-*-open` otherwise pulls the DKMS
+# module signed with an auto-generated, un-enrolled MOK → modprobe fails with "Key
+# was rejected by service" and the GPU is dead until someone enrolls at the console.
+_nv_install_signed_module() {
+  local pkg="$1" ver variant flavor sig dkms
+  have mokutil && mokutil --sb-state 2>/dev/null | grep -qi enabled || return 0
+  [[ "$(cfg_get NVIDIA_MOK_STRATEGY canonical)" == canonical ]] || return 0
+  ver="$(grep -oE '[0-9]+' <<<"$pkg" | head -1)"
+  [[ "$pkg" == *-open* ]] && variant="-open" || variant=""
+  flavor="$(uname -r)"; flavor="${flavor##*-}"          # generic / aws / azure / …
+  sig="linux-modules-nvidia-${ver}${variant}-${flavor}"
+  dkms="nvidia-dkms-${ver}${variant}"
+  if apt-cache policy "$sig" 2>/dev/null | grep -qE 'Candidate: [0-9]'; then
+    narrate "Secure Boot: installing Canonical-signed ${sig} (trusted by default — no MOK/console needed)."
+    apt_install "$sig"
+    if pkg_installed "$dkms"; then
+      narrate "Removing ${dkms} (DKMS, un-enrolled MOK) so the signed module loads instead."
+      run apt-get remove -y "$dkms" || true
+      run update-initramfs -u -k "$(uname -r)" || true
+    fi
+    run depmod -a || true
+  else
+    log_warn "No Canonical-signed ${sig} in the archive — the DKMS module would need a MOK enrolled at a physical console."
+  fi
+}
+
 _nv_blacklist_nouveau() {
   local f=/etc/modprobe.d/blacklist-nouveau.conf
   local content=$'# Added by setup-ubuntu-ai\nblacklist nouveau\noptions nouveau modeset=0\n'
@@ -141,6 +170,7 @@ module_main() {
 
   cfg_set NVIDIA_DRIVER_PKG "$pkg"; cfg_save
   apt_install "$pkg"
+  _nv_install_signed_module "$pkg"
   _nv_blacklist_nouveau
   _nv_enable_persistenced
   _nv_install_cuda
