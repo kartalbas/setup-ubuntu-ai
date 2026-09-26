@@ -120,6 +120,14 @@ printf 'X=--api-key OLDSECRET\n' >"$SB/diffme"
 t "diffs mask inline keys" '! grep -qE "OLDSECRET|NEWSECRET" "$SB/diff.out" && grep -q "<redacted>" "$SB/diff.out"'
 
 # ---------------------------------------------------------------------------
+section "configs: your own config repository"
+write_cfg "LLAMA_MODEL=$MODEL"
+( load; cfg_load; ASSUME_YES=1 configs_run save ) >>"$OUT" 2>&1; rc=$?
+t "unattended without CONFIGS_REPO it stops instead of asking" '[[ $rc -ne 0 ]] && grep -q "No CONFIGS_REPO" "$OUT"'
+( load; cfg_load; INVOKING_USER=root configs_run save ) >>"$OUT" 2>&1; rc=$?
+t "it refuses to clone and push as root" '[[ $rc -ne 0 ]] && grep -q "from your own account" "$OUT"'
+
+# ---------------------------------------------------------------------------
 section "resume after a reboot keeps the mode the run started in"
 resume_mode() {   # prints the NONINTERACTIVE/ASSUME_YES cmd_resume hands on
   ( load; cfg_load; resume_cleanup() { :; }

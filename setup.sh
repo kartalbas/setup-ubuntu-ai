@@ -13,7 +13,7 @@ declare -ga SCRIPT_ARGS=("$@")
 export REPO_ROOT SCRIPT_PATH
 
 # ---- source the library (order matters) ------------------------------------
-for _lib in log core fs config ui version distro privilege apt state thunderbolt hardware runtime; do
+for _lib in log core fs config ui version distro privilege apt state thunderbolt hardware runtime configs; do
   # shellcheck source=/dev/null
   . "$REPO_ROOT/lib/${_lib}.sh"
 done
@@ -48,6 +48,8 @@ ${C_BOLD}COMMANDS${C_RST} (run them in this order, one at a time, or use the men
   resume           Continue a guided run interrupted by a reboot
   restore          Rebuild the whole stack unattended from config (A→Z):
                    drivers, llama.cpp, the exact model, runtime + service
+  configs [save]   This machine's config.conf from / to your own private
+                   config repository (then restore rebuilds from it)
   menu             Open the interactive menu (default when no command given)
 
 ${C_BOLD}FLAGS${C_RST}
@@ -446,6 +448,7 @@ main() {
     uninstall)  cmd_uninstall "${VERB_ARGS[@]}" ;;
     resume)     cmd_resume ;;
     restore)    cmd_restore ;;
+    configs)    configs_run "${VERB_ARGS[@]}" ;;
     menu)       main_menu ;;
     *)          die "Unknown command: ${VERB} (try --help)" ;;
   esac

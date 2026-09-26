@@ -104,6 +104,24 @@ A ready-made profile ships in [`config.bonsai2-27b.conf`](config.bonsai2-27b.con
 [`deploy.sh`](#one-command-on-a-fresh-machine--deploysh) places it and runs
 `restore` for you.
 
+### Keep the config in your own repository
+
+`configs` keeps this machine's `config.conf` in a private repository of yours
+(`OWNER/NAME`), as it is — API key included, so the repository must stay
+private. It asks for the repository and this machine's folder name once
+(default: the short host name; pick another when machines share one) and
+remembers both as `CONFIGS_REPO` / `CONFIGS_HOST`:
+
+```bash
+sudo ./setup.sh configs save   # copy config.conf there, commit, push
+sudo ./setup.sh configs        # on a fresh machine: put it back …
+sudo ./setup.sh restore        # … and rebuild everything from it
+```
+
+The repository is cloned as you to `~/repos/<owner>/<name>` (sign in to
+GitHub first for a private one); the file is in
+`setup-ubuntu-ai/hosts/<CONFIGS_HOST>/config.conf`.
+
 ### Moving to a new machine (same external GPU)
 
 `restore` is built for exactly this: the **same external eGPU on a different
@@ -361,7 +379,8 @@ reachable from your LAN, which the platform ingress needs; keep an API key set.
 setup.sh                  entry point (verbs + menu + dispatch)
 deploy.sh                 place a profile, set the API key, run restore
 package-engine.sh         portable, relocatable engine tarball for deploy.sh --engine
-lib/                      shared helpers (logging, config, ui, apt, runtime rendering, …)
+lib/                      shared helpers (logging, config, ui, apt, runtime rendering,
+                          your config repository, …)
 modules/                  one file per phase (NN-name.sh, exposes module_main)
 services/                 systemd unit template
 config.bonsai2-27b.conf   RTX 5080 + Bonsai 2 27B: 262k context, vision
