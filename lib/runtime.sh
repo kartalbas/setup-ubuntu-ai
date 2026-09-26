@@ -55,8 +55,11 @@ _chat_template_path() {
 # turns ("roles must alternate"), which OpenCode legitimately produces. Each
 # guard is an isolated `{{- raise_exception(...) }}` inside an if/else, so
 # blanking the call leaves a harmless empty block and keeps all the real
-# [INST]/[SYSTEM_PROMPT]/[TOOL_CALLS] handling intact. Derived from the model
-# at restore time — never committed. Returns 1 if the GGUF has no template.
+# [INST]/[SYSTEM_PROMPT]/[TOOL_CALLS] handling intact. ChatML templates (Qwen,
+# Bonsai) that refuse a system message after the first one — Claude Code sends
+# its environment that way — render it as a system turn of its own instead of
+# dropping it. Derived from the model at restore time — never committed.
+# Returns 1 if the GGUF has no template.
 regen_chat_template() {
   local model="$1" out="$2" tmpl
   [[ -f "$model" ]] || { log_warn "Model not found for template regen: $model"; return 1; }
@@ -83,6 +86,11 @@ for _ in range(n_kv):
     k = rstr(); vt, = struct.unpack('<I', f.read(4)); v = rval(vt)
     if k.endswith('chat_template') and isinstance(v, str): tmpl = v
 if not tmpl: sys.exit(2)
+# ChatML: a later system message becomes a system turn of its own.
+if '<|im_start|>' in tmpl:
+    var = 'content' if re.search(r'set\s+content\s*=', tmpl) else 'message.content'
+    tmpl = re.sub(r"\{\{-?\s*raise_exception\(\s*(['\"])System message must be at the beginning\.?\1\s*\)\s*-?\}\}",
+                  lambda m: "{{- '<|im_start|>system\\n' + " + var + " + '<|im_end|>\\n' }}", tmpl)
 # Blank every raise_exception(...) output statement (non-greedy to the `}}`).
 tmpl = re.sub(r'\{\{-?\s*raise_exception\(.*?\)\s*-?\}\}', '{# guard removed #}', tmpl, flags=re.S)
 sys.stdout.write(tmpl)

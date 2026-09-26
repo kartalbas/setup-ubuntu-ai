@@ -97,7 +97,10 @@ runtime → service → doctor — reading every decision from the config:
   extracted and its `raise_exception(…)` validation guards are neutralised. This
   fixes agentic clients (OpenCode, etc.) that legitimately send consecutive
   same-role turns and otherwise hit *"roles must alternate"* with some models
-  (Mistral/Devstral), while keeping all tool-call handling intact. The file is
+  (Mistral/Devstral), while keeping all tool-call handling intact. ChatML
+  templates (Qwen, Bonsai) that allow a system message only at the start render
+  a later one as a system turn of its own: Claude Code sends its environment
+  (working directory, date, git state) that way. The file is
   derived at `/etc/setup-ubuntu-ai/<model>-template.jinja`, never committed.
 
 A ready-made profile ships in [`config.bonsai2-27b.conf`](config.bonsai2-27b.conf);

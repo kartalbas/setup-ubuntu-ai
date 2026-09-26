@@ -137,8 +137,9 @@ module_main() {
   fi
 
   # Permissive chat template — needed for agentic clients (OpenCode, etc.) that
-  # send consecutive same-role turns, which some stock templates reject.
-  if ui_yesno "Regenerate a permissive chat template from the model (fixes agentic clients' 'roles must alternate' error, keeps tool-calls)?"; then
+  # send consecutive same-role turns, and Claude Code, which sends a system
+  # message mid-conversation; some stock templates reject both.
+  if ui_yesno "Regenerate a permissive chat template from the model (fixes agentic clients' 'roles must alternate' and Claude Code's 'System message must be at the beginning' errors, keeps tool-calls)?"; then
     cfg_set CHAT_TEMPLATE_FIXUP 1
   else
     cfg_set CHAT_TEMPLATE_FIXUP 0

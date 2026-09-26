@@ -48,6 +48,9 @@ ${C_BOLD}COMMANDS${C_RST} (run them in this order, one at a time, or use the men
   resume           Continue a guided run interrupted by a reboot
   restore          Rebuild the whole stack unattended from config (A→Z):
                    drivers, llama.cpp, the exact model, runtime + service
+  config show | set KEY VALUE
+                   Show the config (API key hidden), or change one key; apply it
+                   with the step that uses it (e.g. service install)
   configs [save]   This machine's config.conf from / to your own private
                    config repository (then restore rebuilds from it)
   menu             Open the interactive menu (default when no command given)
@@ -268,6 +271,23 @@ _restore_rehome() {
 # user, and stale state flags (CUDA_OK/SERVICE_INSTALLED) are harmless because
 # every phase re-runs unconditionally. A NVIDIA Secure-Boot/MOK reboot still
 # pauses the run; continue with `resume` afterwards.
+# cmd_config show | set KEY VALUE — look at the config (API key hidden) or
+# change one key in it.
+cmd_config() {
+  case "${1:-}" in
+    show)
+      [[ -f "$CONFIG_FILE" ]] || die "No config yet: ${CONFIG_FILE}"
+      sed -E 's/^(LLAMA_API_KEY=).*/\1"<hidden>"/' "$CONFIG_FILE" ;;
+    set)
+      (( $# == 3 )) || die "config set KEY VALUE"
+      [[ "$2" =~ ^[A-Z_][A-Z0-9_]*$ ]] || die "Not a config key: $2"
+      [[ "$3" != *'"'* && "$3" != *$'\n'* ]] || die "Config values must not contain quotes or newlines"
+      cfg_set "$2" "$3"; cfg_save
+      log_ok "$2 set — apply it with the step that uses it (e.g. sudo ./setup.sh service install)" ;;
+    *) die "config: show | set KEY VALUE" ;;
+  esac
+}
+
 cmd_restore() {
   log_step "Restore: rebuild the whole stack from config (A→Z, unattended)"
   if [[ -z "$(cfg_get MODEL_REPO)" || -z "$(cfg_get MODEL_FILE)" ]]; then
@@ -449,6 +469,7 @@ main() {
     resume)     cmd_resume ;;
     restore)    cmd_restore ;;
     configs)    configs_run "${VERB_ARGS[@]}" ;;
+    config)     cmd_config "${VERB_ARGS[@]}" ;;
     menu)       main_menu ;;
     *)          die "Unknown command: ${VERB} (try --help)" ;;
   esac

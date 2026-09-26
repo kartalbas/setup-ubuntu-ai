@@ -51,7 +51,10 @@ import struct, sys
 def s(x): b = x.encode(); return struct.pack('<Q', len(b)) + b
 kv = [('general.architecture', 8, s('qwen35')),
       ('qwen35.context_length', 4, struct.pack('<I', 262144)),
-      ('tokenizer.chat_template', 8, s("{%- if x %}{{- raise_exception('roles must alternate') }}{%- endif %}OK"))]
+      ('tokenizer.chat_template', 8, s("{%- for message in messages %}{%- set content = message.content %}"
+          "{%- if message.role == 'system' %}{%- if not loop.first %}{{- raise_exception('System message must be at the beginning.') }}"
+          "{%- endif %}{%- else %}{{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>\\n' }}{%- endif %}{%- endfor %}"
+          "{%- if x %}{{- raise_exception('roles must alternate') }}{%- endif %}OK"))]
 with open(sys.argv[1], 'wb') as f:
     f.write(b'GGUF' + struct.pack('<I', 3) + struct.pack('<Q', 0) + struct.pack('<Q', len(kv)))
     for k, t, v in kv: f.write(s(k) + struct.pack('<I', t) + v)
@@ -74,6 +77,10 @@ t "configure: env carries --alias, --mmproj and --chat-template-file" \
   'grep -q -- "--alias m.gguf" "$LLAMA_ENV_FILE" && grep -q -- "--mmproj $MMPROJ" "$LLAMA_ENV_FILE" && grep -q -- "--chat-template-file $SB/etc/m-template.jinja" "$LLAMA_ENV_FILE"'
 t "configure: template regenerated without raise_exception" \
   '[[ -s "$SB/etc/m-template.jinja" ]] && ! grep -q raise_exception "$SB/etc/m-template.jinja"'
+if python3 -c 'import jinja2' 2>/dev/null; then
+  t "configure: a later system message renders as a system turn (Claude Code)" \
+    '[[ "$(python3 -c "import jinja2, sys; print(jinja2.Template(open(sys.argv[1]).read()).render(messages=[{\"role\": \"user\", \"content\": \"hi\"}, {\"role\": \"system\", \"content\": \"ENV\"}]))" "$SB/etc/m-template.jinja")" == *"<|im_start|>system"*ENV*"<|im_end|>"* ]]'
+fi
 t "configure: no unit rendered before 'service install'" '[[ ! -e "$LLAMA_UNIT_FILE" ]]'
 ( load; cfg_load; . "$ROOT/modules/60-service-llama.sh"; module_main install ) >>"$OUT" 2>&1
 t "service install: env still carries the derived args" \
@@ -118,6 +125,16 @@ t "the profile placeholder is refused" '[[ $rc -ne 0 && ! -e "$LLAMA_KEY_FILE" ]
 printf 'X=--api-key OLDSECRET\n' >"$SB/diffme"
 ( load; show_diff "$SB/diffme" <<<'X=--api-key NEWSECRET' ) >"$SB/diff.out" 2>&1
 t "diffs mask inline keys" '! grep -qE "OLDSECRET|NEWSECRET" "$SB/diff.out" && grep -q "<redacted>" "$SB/diff.out"'
+
+# ---------------------------------------------------------------------------
+section "config show | set"
+write_cfg "LLAMA_MODEL=$MODEL" "LLAMA_API_KEY=secret123"
+eval "$(sed -n '/^cmd_config() {/,/^}/p' "$ROOT/setup.sh")"
+( load; cfg_load; cmd_config set CHAT_TEMPLATE_FIXUP 1 ) >>"$OUT" 2>&1
+t "config set changes one key and keeps the rest" '[[ "$(cfg_value CHAT_TEMPLATE_FIXUP)" == 1 && "$(cfg_value LLAMA_API_KEY)" == secret123 ]]'
+t "config show hides the API key" '( load; cmd_config show ) 2>/dev/null | grep -q "LLAMA_API_KEY=\"<hidden>\"" && ! ( load; cmd_config show ) 2>/dev/null | grep -q secret123'
+( load; cfg_load; cmd_config set CHAT_TEMPLATE_FIXUP 'a"b' ) >>"$OUT" 2>&1; rc=$?
+t "config set refuses quotes" '[[ $rc -ne 0 ]]'
 
 # ---------------------------------------------------------------------------
 section "configs: your own config repository"
