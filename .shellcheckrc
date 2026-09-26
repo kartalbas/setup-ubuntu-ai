@@ -1,0 +1,5 @@
+# shellcheck project config
+shell=bash
+external-sources=true
+# Library files are sourced, not executed; allow unresolved sources.
+disable=SC1091

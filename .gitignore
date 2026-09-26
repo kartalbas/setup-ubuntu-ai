@@ -1,0 +1,10 @@
+*.bak.*
+*.tmp
+*.log
+
+# scratch workspace (never committed)
+.work/
+
+# packaged engine tarballs — host on GitHub Releases, never in git
+*.tar.zst
+*.tar.gz
