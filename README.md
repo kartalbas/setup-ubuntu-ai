@@ -387,7 +387,7 @@ lib/                      shared helpers (logging, config, ui, apt, runtime rend
 modules/                  one file per phase (NN-name.sh, exposes module_main)
 services/                 systemd unit template
 config.bonsai2-27b.conf   RTX 5080 + Bonsai 2 27B: 262k context, vision
-config.qwen3.8-27b-q3kxl.conf  RTX 5080 + Qwen3.8-27B UD-Q3_K_XL: 100k context, text only
+config.qwen3.8-27b-q3kxl.conf  RTX 5070 Ti + Qwen3.8-27B UD-Q3_K_XL: 144k context, text only
 opencode*.json            OpenCode client configs (local / remote)
 benchmarks/               config-editing accuracy benchmark
 tests/run.sh              behavioural tests (unprivileged sandbox, no GPU needed)
