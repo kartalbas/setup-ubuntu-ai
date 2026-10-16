@@ -6,12 +6,34 @@
 
 NVIDIA_DEFAULT_PKG="nvidia-driver-595-open"
 
+# _nv_latest_pkg — the newest nvidia-driver-N-open in the archive (transitional
+# metapackages skipped). Under Secure Boot with the 'canonical' strategy only a
+# version whose Canonical-signed linux-modules-nvidia-N-open-<flavor> exists for
+# the running kernel counts, so the module loads without a MOK. Empty if none.
+_nv_latest_pkg() {
+  local flavor p v signed=0
+  flavor="$(uname -r)"; flavor="${flavor##*-}"
+  if have mokutil && mokutil --sb-state 2>/dev/null | grep -qi enabled \
+     && [[ "$(cfg_get NVIDIA_MOK_STRATEGY canonical)" == canonical ]]; then
+    signed=1
+  fi
+  while read -r p; do
+    v="$(grep -oE '[0-9]+' <<<"$p" | head -1)"
+    if (( signed )) && [[ -z "$(apt_candidate "linux-modules-nvidia-${v}-open-${flavor}")" ]]; then
+      continue
+    fi
+    printf '%s' "$p"; return 0
+  done < <(apt-cache search --names-only '^nvidia-driver-[0-9]+-open$' 2>/dev/null \
+             | grep -vi transitional | awk '{print $1}' | sort -rV)
+}
+
+# _nv_pick_pkg — NVIDIA_DRIVER_PKG names a package (pinned), or is "latest" /
+# unset: the newest open driver this machine can load.
 _nv_pick_pkg() {
-  local pkg; pkg="$(cfg_get NVIDIA_DRIVER_PKG)"
-  if [[ -z "$pkg" ]] && have ubuntu-drivers; then
-    # Prefer the distro-recommended *-open metapackage.
-    pkg="$(ubuntu-drivers devices 2>/dev/null | awk '/recommended/ && /-open/ {print $3; exit}')"
-    [[ -z "$pkg" ]] && pkg="$(ubuntu-drivers devices 2>/dev/null | awk '/nvidia-driver-[0-9]+-open/ {print $3; exit}')"
+  local pkg; pkg="$(cfg_get NVIDIA_DRIVER_PKG latest)"
+  if [[ "$pkg" == latest ]]; then
+    pkg="$(_nv_latest_pkg)"
+    [[ -n "$pkg" ]] || log_warn "No nvidia-driver-*-open found in the archive — falling back to ${NVIDIA_DEFAULT_PKG}."
   fi
   echo "${pkg:-$NVIDIA_DEFAULT_PKG}"
 }
@@ -71,7 +93,7 @@ _nv_install_signed_module() {
   flavor="$(uname -r)"; flavor="${flavor##*-}"          # generic / aws / azure / …
   sig="linux-modules-nvidia-${ver}${variant}-${flavor}"
   dkms="nvidia-dkms-${ver}${variant}"
-  if apt-cache policy "$sig" 2>/dev/null | grep -qE 'Candidate: [0-9]'; then
+  if [[ -n "$(apt_candidate "$sig")" ]]; then
     narrate "Secure Boot: installing Canonical-signed ${sig} (trusted by default — no MOK/console needed)."
     apt_install "$sig"
     if pkg_installed "$dkms"; then
@@ -100,7 +122,7 @@ _nv_blacklist_nouveau() {
 }
 
 _nv_enable_persistenced() {
-  if systemctl list-unit-files 2>/dev/null | grep -q '^nvidia-persistenced'; then
+  if [[ "$(systemctl list-unit-files 2>/dev/null || true)" == *$'\n'nvidia-persistenced* ]]; then
     narrate "Enabling nvidia-persistenced for stable headless clocks & lower latency."
     run systemctl enable --now nvidia-persistenced || log_warn "Could not start nvidia-persistenced yet (needs the driver loaded)."
   fi
@@ -114,10 +136,31 @@ _nv_nvcc() {
   printf '%s' "$nvcc"
 }
 
+# _nv_cuda_upgrade PKG — bring an installed toolkit metapackage to its newest
+# candidate. "cuda-toolkit" (the default) follows NVIDIA's newest release; a
+# versioned one (cuda-toolkit-13-4) only gets that release's updates.
+_nv_cuda_upgrade() {
+  local pkg="$1" inst cand
+  pkg_installed "$pkg" || return 0
+  apt_update
+  inst="$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)"
+  cand="$(apt_candidate "$pkg")"
+  if [[ -n "$cand" && "$cand" != "$inst" ]]; then
+    narrate "Upgrading ${pkg} ${inst} → ${cand}."
+    apt_wait_locks
+    run apt-get install -y "$pkg"
+  else
+    log_ok "${pkg} ${inst} is the newest available."
+  fi
+}
+
 _nv_install_cuda() {
+  local cuda_pkg; cuda_pkg="$(cfg_get CUDA_TOOLKIT_PKG cuda-toolkit)"
   local nvcc; nvcc="$(_nv_nvcc)"
   if [[ -n "$nvcc" ]] && "$nvcc" --list-gpu-arch 2>/dev/null | grep -q 'compute_120'; then
-    log_ok "CUDA toolkit $("$nvcc" --version | sed -n 's/.*release \([0-9.]*\).*/\1/p') already present and supports sm_120."
+    _nv_cuda_upgrade "$cuda_pkg"
+    nvcc="$(_nv_nvcc)"
+    log_ok "CUDA toolkit $("$nvcc" --version | sed -n 's/.*release \([0-9.]*\).*/\1/p') present and supports sm_120."
     cfg_set CUDA_OK 1; cfg_save; return 0
   fi
   narrate "Installing the CUDA toolkit (nvcc) — needed to compile llama.cpp for Blackwell (sm_120, CUDA ≥12.8)."
@@ -132,7 +175,7 @@ _nv_install_cuda() {
   run dpkg -i "$deb"
   rm -f "$deb"
   _APT_UPDATED=0
-  apt_install cuda-toolkit
+  apt_install "$cuda_pkg"
 
   # Put nvcc on PATH for every shell.
   local prof=/etc/profile.d/cuda.sh
@@ -167,8 +210,10 @@ Until you do this, the NVIDIA module will not load under Secure Boot." "Action n
 
 module_main() {
   log_step "NVIDIA driver + CUDA (Blackwell)"
+  # "latest" is resolved against a fresh package index.
+  [[ "$(cfg_get NVIDIA_DRIVER_PKG latest)" == latest ]] && apt_update
   local pkg; pkg="$(_nv_pick_pkg)"
-  log_info "Driver package: ${pkg}"
+  log_info "Driver package: ${pkg}$([[ "$(cfg_get NVIDIA_DRIVER_PKG latest)" == latest ]] && echo ' (latest)')"
 
   if _nv_already "$pkg"; then
     log_ok "NVIDIA driver already installed and responding:"
@@ -179,7 +224,9 @@ module_main() {
 
   _nv_secureboot_preflight || { log_warn "Stopping NVIDIA install before changes."; return 0; }
 
-  cfg_set NVIDIA_DRIVER_PKG "$pkg"; cfg_save
+  # Keep "latest" as the choice; record what it resolved to.
+  [[ "$(cfg_get NVIDIA_DRIVER_PKG latest)" == latest ]] || cfg_set NVIDIA_DRIVER_PKG "$pkg"
+  cfg_set NVIDIA_DRIVER_INSTALLED "$pkg"; cfg_save
   apt_install "$pkg"
   _nv_install_signed_module "$pkg"
   _nv_blacklist_nouveau
@@ -197,7 +244,7 @@ module_main() {
 
 module_uninstall() {
   log_step "Removing NVIDIA driver + CUDA"
-  local pkg; pkg="$(cfg_get NVIDIA_DRIVER_PKG "$NVIDIA_DEFAULT_PKG")"
+  local pkg; pkg="$(cfg_get NVIDIA_DRIVER_INSTALLED "$(cfg_get NVIDIA_DRIVER_PKG "$NVIDIA_DEFAULT_PKG")")"
   run systemctl disable --now nvidia-persistenced 2>/dev/null || true
   apt_wait_locks
   run apt-get purge -y "$pkg" 'cuda-toolkit*' 'nvidia-*' 2>/dev/null || true

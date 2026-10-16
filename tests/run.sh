@@ -228,6 +228,35 @@ t "set_conf_value replaces and appends verbatim" \
   '[[ "$(cat "$CONF_DST")" == "$(printf '\''A="1"\nLLAMA_API_KEY="x+/y&z\\w"\nB="2"'\'')" ]]'
 
 # ---------------------------------------------------------------------------
+section "drivers: NVIDIA_DRIVER_PKG=latest picks the newest loadable open driver"
+# drv_pick SB_STATE — _nv_pick_pkg against a stubbed archive: 615 and 610
+# (transitional) are offered, 615 has no signed module, 595 has one.
+drv_pick() {
+  ( load; cfg_load; . "$ROOT/modules/20-drivers-nvidia.sh"
+    mokutil() { echo "SecureBoot $SB_STATE"; }
+    uname()   { echo 7.0.0-38-generic; }
+    apt-cache() {
+      case "$1" in
+        search) printf '%s\n' "nvidia-driver-595-open - NVIDIA driver (open kernel) metapackage" \
+                  "nvidia-driver-610-open - NVIDIA driver (open kernel) metapackage (transitional package)" \
+                  "nvidia-driver-615-open - NVIDIA driver (open kernel) metapackage" ;;
+        policy) # a long version table, as apt prints it: a pipe into grep -q would SIGPIPE it
+                printf '%s:\n  Installed: (none)\n' "$2"
+                if [[ "$2" == linux-modules-nvidia-595-open-generic ]]; then echo "  Candidate: 7.0.0-38.38+2"; else echo "  Candidate: (none)"; fi
+                seq 1 20000 | sed 's/^/     /' ;;
+      esac
+    }
+    SB_STATE="$1" _nv_pick_pkg )
+}
+write_cfg "NVIDIA_DRIVER_PKG=latest"
+t "Secure Boot off: the newest non-transitional driver" '[[ "$(drv_pick disabled 2>/dev/null)" == nvidia-driver-615-open ]]'
+t "Secure Boot on: the newest with a Canonical-signed module" '[[ "$(drv_pick enabled 2>/dev/null)" == nvidia-driver-595-open ]]'
+write_cfg
+t "unset means latest" '[[ "$(drv_pick disabled 2>/dev/null)" == nvidia-driver-615-open ]]'
+write_cfg "NVIDIA_DRIVER_PKG=nvidia-driver-595-open"
+t "a named package stays pinned" '[[ "$(drv_pick disabled 2>/dev/null)" == nvidia-driver-595-open ]]'
+
+# ---------------------------------------------------------------------------
 if command -v shellcheck >/dev/null; then
   section "shellcheck"
   t "all scripts are clean" 'shellcheck -x "$ROOT"/setup.sh "$ROOT"/deploy.sh "$ROOT"/package-engine.sh "$ROOT"/lib/*.sh "$ROOT"/modules/*.sh "$ROOT"/tests/run.sh >"$SB/sc.log" 2>&1 || { cat "$SB/sc.log"; false; }'

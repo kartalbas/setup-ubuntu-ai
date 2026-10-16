@@ -84,6 +84,11 @@ sudo ./setup.sh restore
 runtime → service → doctor — reading every decision from the config:
 
 - **GPU profile / driver** — `HW_*`, `NVIDIA_DRIVER_PKG`, `NVIDIA_POWER_LIMIT_W`.
+  `NVIDIA_DRIVER_PKG="latest"` (also when unset) takes the newest
+  `nvidia-driver-N-open` in the archive — under Secure Boot the newest one with
+  a Canonical-signed module for the running kernel; a package name pins it.
+  `CUDA_TOOLKIT_PKG` (default `cuda-toolkit`, NVIDIA's newest) is upgraded on
+  every `drivers` run; `cuda-toolkit-13-4` pins a release.
 - **Engine** — `LLAMACPP_REPO` (default: upstream `ggml-org/llama.cpp`, or a
   fork) and `LLAMACPP_REF`, a branch, tag or commit that pins the build (empty =
   the remote's default branch); built in `~/llama`.

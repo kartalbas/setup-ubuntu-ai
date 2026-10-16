@@ -53,6 +53,17 @@ apt_update() {
   _APT_UPDATED=1
 }
 
+# apt_candidate PKG — the version apt would install, or nothing. Read whole
+# before matching: `apt-cache policy … | grep -q` lets grep exit at the first
+# match, apt-cache dies of SIGPIPE, and pipefail turns the hit into a miss.
+apt_candidate() {
+  local out v
+  out="$(LC_ALL=C apt-cache policy "$1" 2>/dev/null || true)"
+  v="$(awk '/Candidate:/ {print $2; exit}' <<<"$out")"
+  [[ -n "$v" && "$v" != "(none)" ]] && printf '%s' "$v"
+  return 0
+}
+
 # pkg_installed PKG — true if dpkg reports it installed.
 pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
 
