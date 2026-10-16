@@ -149,9 +149,15 @@ fi
 
 # Everything else — drivers, engine, model, configure, service — A→Z.
 info "Running: setup.sh restore  (unattended, may take a while)…"
-"$REPO_ROOT/setup.sh" restore
+rc=0
+"$REPO_ROOT/setup.sh" restore || rc=$?
 
 echo
+if (( rc != 0 )); then
+  info "restore stopped (exit ${rc}) — fix the step it names, then: sudo ./setup.sh restore"
+  [[ "$KEY_ORIGIN" == generated ]] && info "Generated API key, already in ${CONF_DST} (clients send it as 'Authorization: Bearer <key>'): ${KEY}"
+  exit "$rc"
+fi
 info "Done."
 SVC=llama-server; [[ "$(conf_value "$CONF_DST" ENGINE)" == strata ]] && SVC=strata-server
 info "Manage:  systemctl status ${SVC}   ·   journalctl -u ${SVC} -f"

@@ -305,6 +305,7 @@ on the GPU — for 128 GB of RAM.
 | `STRATA_CONTEXT`, `STRATA_KV`, `STRATA_VISION` | `--context`, `--kv`, `--vision` |
 | `STRATA_DATA_DIR` | `--data-dir` (model files, default `~/Strata-data`) |
 | `STRATA_SETUP_ARGS` | any other installer options, verbatim |
+| `STRATA_PATCHES` | fixes from [`patches/strata/`](patches/strata) applied on top of `STRATA_REF` until a release has them (e.g. `tensorless-shard`: UD-Q5_K_XL's first shard, upstream #2505/#2632) |
 | `LLAMA_HOST`, `LLAMA_PORT` | `--host`, `--port` (shared with llama.cpp) |
 
 - **`build`** checks Strata out and runs its own installer unattended
@@ -435,7 +436,8 @@ lib/                      shared helpers (logging, config, ui, apt, runtime rend
                           your config repository, …)
 modules/                  one file per phase (NN-name.sh, exposes module_main;
                           45-strata.sh drives Strata's installer)
-services/                 systemd unit template
+services/                 systemd unit templates (llama-server, strata-server)
+patches/strata/           fixes on top of the pinned Strata release (STRATA_PATCHES)
 config.bonsai2-27b.conf   RTX 5080 + Bonsai 2 27B: 262k context, vision
 config.qwen3.8-27b-q3kxl.conf  RTX 5070 Ti + Qwen3.8-27B UD-Q3_K_XL: 144k context, text only
 config.strata-ud-q5kxl.conf    RTX 5080 + 128 GB: Strata, Qwen3.8-Flash-Next UD-Q5_K_XL, 262k context

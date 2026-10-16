@@ -271,7 +271,7 @@ cmd_resume() {
     ASSUME_YES=1 NONINTERACTIVE=1
   fi
   resume_cleanup
-  guided_all "$from"
+  guided_all "$from" || exit 1
 }
 
 # _restore_rehome — make a config carried from another machine portable. The
@@ -349,10 +349,14 @@ cmd_restore() {
   # Read by the modules run_module sources (subshells inherit shell variables).
   # shellcheck disable=SC2034
   ASSUME_YES=1 NONINTERACTIVE=1
-  guided_all detect
+  if ! guided_all detect; then
+    log_error "Restore stopped before the end — fix the step above, then run: sudo ${0##*/} restore"
+    exit 1
+  fi
 }
 
 # guided_all [START_VERB] — walk the phases in order, skipping completed steps.
+# Returns 1 when it stopped early on a failed step (the step says why).
 guided_all() {
   local start="${1:-detect}" started=0
   local phases=(detect drivers power build model configure service doctor)
@@ -366,7 +370,7 @@ guided_all() {
       drivers)   dispatch_drivers
                  if (( MODULE_RC != 0 )); then
                    log_warn "Driver step did not finish; stopping guided run here."
-                   return 0
+                   return 1
                  fi ;;
       power)     # Only when a cap is configured (NVIDIA); pass it explicitly so
                  # the step stays non-interactive. Skipped otherwise.
@@ -384,7 +388,7 @@ guided_all() {
     # Stop the guided chain on a hard failure of a prerequisite step.
     if (( MODULE_RC != 0 )) && [[ "$p" == build || "$p" == model ]]; then
       log_warn "Step '${p}' failed; stopping guided run. Fix it, then re-run 'resume' or the menu."
-      return 0
+      return 1
     fi
   done
   log_ok "Guided setup complete."
@@ -457,7 +461,7 @@ main_menu() {
       "Steps run top-to-bottom. Pick a number, or A/S/Q:" "${items[@]}")" || break
 
     case "$choice" in
-      A)        guided_all; continue ;;
+      A)        guided_all || true; continue ;;
       S)        cmd_status; ui_pause; continue ;;
       Q|""|" ") break ;;
       *) if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#actions[@]} )); then

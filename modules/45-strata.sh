@@ -9,9 +9,51 @@
 # downloaded is kept, the settings are rewritten.
 # shellcheck source=/dev/null
 
+# _st_patch_files — the patches STRATA_PATCHES names (patches/strata/NAME.patch
+# in this repository), one path per line; fails on a name that has no file.
+_st_patch_files() {
+  local -a names=(); local n f
+  read -r -a names <<<"$(cfg_get STRATA_PATCHES)"
+  for n in "${names[@]}"; do
+    f="$REPO_ROOT/patches/strata/${n%.patch}.patch"
+    [[ -f "$f" ]] || { log_error "STRATA_PATCHES: no ${f}"; return 1; }
+    printf '%s\n' "$f"
+  done
+}
+
+# _st_patches_revert / _st_patches_apply — take the patches out before the
+# checkout moves (a clean tree for any ref) and put them back after. Idempotent:
+# a patch already in (or already out) is left as it is.
+_st_patches_revert() {
+  local dir f; dir="$(strata_dir)"
+  while read -r f; do
+    [[ -n "$f" ]] || continue
+    as_user git -C "$dir" apply --check -R "$f" 2>/dev/null && run_as_user git -C "$dir" apply -R "$f"
+  done < <(cfg_get STRATA_PATCHES_APPLIED | tr ' ' '\n')
+  cfg_del STRATA_PATCHES_APPLIED
+  return 0
+}
+_st_patches_apply() {
+  local dir f list; local -a applied=()
+  dir="$(strata_dir)"
+  list="$(_st_patch_files)" || return 1
+  while read -r f; do
+    [[ -n "$f" ]] || continue
+    if as_user git -C "$dir" apply --check -R "$f" 2>/dev/null; then
+      log_ok "Strata patch already in: ${f##*/}"
+    else
+      narrate "Patching Strata: ${f##*/} ($(head -1 "$f"))"
+      run_as_user git -C "$dir" apply "$f" || { log_error "${f##*/} does not apply to $(cfg_get STRATA_REF 'this Strata') — drop or refresh it."; return 1; }
+    fi
+    applied+=("$f")
+  done <<<"$list"
+  cfg_set STRATA_PATCHES_APPLIED "${applied[*]}"; cfg_save
+}
+
 _st_checkout() {
   local dir repo ref
   dir="$(strata_dir)"; repo="$(cfg_get STRATA_REPO "$STRATA_REPO_DEFAULT")"; ref="$(cfg_get STRATA_REF)"
+  [[ -d "$dir/.git" ]] && _st_patches_revert
   if [[ ! -d "$dir/.git" ]]; then
     narrate "Cloning Strata (${repo}) into ${dir}."
     run_as_user git clone -q "$repo" "$dir" || return 1
@@ -27,6 +69,7 @@ _st_checkout() {
     run_as_user git -C "$dir" pull -q --ff-only || log_warn "Strata not updated (local changes?) — using it as it is."
   fi
   cfg_set STRATA_BUILT_REV "$(as_user git -C "$dir" rev-parse HEAD 2>/dev/null)"; cfg_save
+  _st_patches_apply
 }
 
 module_main() {
@@ -64,6 +107,6 @@ module_uninstall() {
   log_step "Removing the Strata engine"
   local dir; dir="$(strata_dir)"
   [[ -d "$dir" ]] && run rm -rf "$dir"
-  cfg_del STRATA_CONFIG; cfg_del STRATA_BUILT_REV; cfg_save
+  cfg_del STRATA_CONFIG; cfg_del STRATA_BUILT_REV; cfg_del STRATA_PATCHES_APPLIED; cfg_save
   log_ok "Strata removed. The model files stay in $(strata_data_dir) (delete them by hand to free the disk)."
 }

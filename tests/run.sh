@@ -243,15 +243,24 @@ SKEY='s+/k=y&2'
 write_cfg "ENGINE=strata" "STRATA_DIR=$SDIR" "STRATA_DATA_DIR=$SDATA" "STRATA_REF=v0.1.44.1" \
   "STRATA_FAMILY=unsloth" "STRATA_MODEL=UD-Q5_K_XL" "STRATA_CONTEXT=262144" "STRATA_KV=int8" "STRATA_VISION=gpu" \
   "STRATA_SETUP_ARGS=--vram-reserve-mib 1024" "LLAMA_HOST=0.0.0.0" "LLAMA_PORT=8080" "LLAMA_API_KEY=$SKEY" \
-  "HW_VENDOR=nvidia" "CUDA_OK=1"
+  "HW_VENDOR=nvidia" "CUDA_OK=1" "STRATA_PATCHES=tensorless-shard"
 : >"$LLAMA_UNIT_FILE"    # a llama-server unit from before: the strata install retires it
 ( load; cfg_load
-  git() { echo "git $*" >>"$SB/calls.log"; [[ "$*" == *rev-parse* ]] && echo 0123456789abcdef; return 0; }
+  git() {
+    echo "git $*" >>"$SB/calls.log"
+    [[ "$*" == *rev-parse* ]] && echo 0123456789abcdef
+    [[ "$*" == *"apply --check -R"* ]] && return 1     # the patch is not in yet
+    return 0
+  }
   . "$ROOT/modules/45-strata.sh"; module_main ) >>"$OUT" 2>&1
 t "the installer runs unattended with the config's settings" \
   '[[ "$(tr "\n" " " <"$SDIR/args.log")" == "--setup --yes --no-start --no-browser --family unsloth --model UD-Q5_K_XL --data-dir $SDATA --host 0.0.0.0 --port 8080 --context 262144 --kv int8 --vision gpu --vram-reserve-mib 1024 " ]]'
 t "the API key is not handed to Strata's installer" '! grep -qF -- "$SKEY" "$SDIR/args.log" && ! grep -q -- --api-key "$SDIR/args.log"'
 t "Strata is pinned to STRATA_REF" 'grep -q "checkout -q v0.1.44.1" "$SB/calls.log"'
+t "STRATA_PATCHES are applied after the checkout, and recorded" \
+  'grep -q "apply $ROOT/patches/strata/tensorless-shard.patch" "$SB/calls.log" && [[ "$(cfg_value STRATA_PATCHES_APPLIED)" == "$ROOT/patches/strata/tensorless-shard.patch" ]]'
+t "every shipped patch says what it fixes and when to drop it" \
+  'for f in "$ROOT"/patches/strata/*.patch; do grep -qi "drop this patch" "$f" || exit 1; done'
 t "the written config is recorded" '[[ "$(cfg_value STRATA_CONFIG)" == "$SDIR/strata-unsloth-ud-q5_k_xl.json" && "$(cfg_value STRATA_BUILT_REV)" == 0123456789abcdef ]]'
 ( load; cfg_load; . "$ROOT/modules/60-service-llama.sh"; module_main install ) >>"$OUT" 2>&1
 t "service install writes strata-server.service with the run script" \
@@ -269,6 +278,8 @@ if command -v systemd-analyze >/dev/null; then
   t "the rendered unit parses (no unknown or invalid lines)" \
     '! systemd-analyze verify "$STRATA_UNIT_FILE" 2>&1 | grep -E "Unknown (key|section)|Invalid|Failed to parse|bad unit file"'
 fi
+write_cfg "STRATA_PATCHES=no-such-fix"
+t "an unknown STRATA_PATCHES name stops the step" '! ( load; cfg_load; . "$ROOT/modules/45-strata.sh"; _st_patch_files ) >/dev/null 2>&1'
 write_cfg "ENGINE=strata" "STRATA_FAMILY=unsloth"
 t "a missing STRATA_MODEL is named" '[[ "$( ( load; cfg_load; strata_problem ) )" == *STRATA_MODEL* ]]'
 write_cfg "ENGINE=strata" "STRATA_FAMILY=unsloth" "STRATA_MODEL=UD-Q5_K_XL;rm"
