@@ -323,7 +323,16 @@ on the GPU — for 128 GB of RAM.
   exports it to `STRATA_API_KEY` just before the server starts — not on a
   command line, not in a file outside `/etc/setup-ubuntu-ai`.
 - Clients: OpenAI API under `http://<host>:8080/v1`, Anthropic Messages under
-  `/v1/messages` (Claude Code: `ANTHROPIC_BASE_URL=http://<host>:8080`).
+  `/v1/messages`. **OpenCode**: [`opencode.strata.example.json`](opencode.strata.example.json)
+  (address and key to fill in). **Claude Code**:
+
+  ```bash
+  export ANTHROPIC_BASE_URL=http://<host>:8080
+  export ANTHROPIC_AUTH_TOKEN=<key>          # sent as a bearer token
+  export ANTHROPIC_MODEL=qwen3.8-flash-next-unsloth-ud-q5_k_xl
+  export ANTHROPIC_SMALL_FAST_MODEL=$ANTHROPIC_MODEL
+  claude
+  ```
 
 ## Public access — the platform ingress
 
@@ -441,8 +450,8 @@ patches/strata/           fixes on top of the pinned Strata release (STRATA_PATC
 config.bonsai2-27b.conf   RTX 5080 + Bonsai 2 27B: 262k context, vision
 config.qwen3.8-27b-q3kxl.conf  RTX 5070 Ti + Qwen3.8-27B UD-Q3_K_XL: 144k context, text only
 config.strata-ud-q5kxl.conf    RTX 5080 + 128 GB: Strata, Qwen3.8-Flash-Next UD-Q5_K_XL, 262k context
-opencode*.json            OpenCode client configs (local / remote)
-benchmarks/               config-editing accuracy benchmark
+opencode*.json            OpenCode client configs (local / remote / Strata)
+benchmarks/               config-editing accuracy; context_bench.py: speed + needle at 4k-256k
 tests/run.sh              behavioural tests (unprivileged sandbox, no GPU needed)
 ```
 
