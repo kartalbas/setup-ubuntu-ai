@@ -280,6 +280,50 @@ for screenshots. The server ignores the model name clients send, so existing
 configs with an older model id keep working; the id `/v1/models` reports is
 the GGUF file name.
 
+## The Strata engine — Qwen3.8-Flash-Next on one 16 GB GPU
+
+`ENGINE="strata"` swaps llama.cpp for [Strata](https://github.com/Niko1221/Strata),
+an engine for **Qwen3.8-Flash-Next** (a 125B MoE with 24,576 experts, 10 per
+token, 262k context): the most used experts on the GPU, every expert in RAM,
+the model's lookup table on the SSD, MTP drafts. The rest of the stack —
+drivers, power cap, API key, service, doctor, `configs`, `restore` — stays the
+same.
+
+```bash
+sudo ./deploy.sh strata-ud-q5kxl     # drivers → Strata engine + model → service, A→Z
+```
+
+[`config.strata-ud-q5kxl.conf`](config.strata-ud-q5kxl.conf): Unsloth's
+UD-Q5_K_XL (158 GB download, 91.6 GiB of experts in RAM; 94.55 % the same top
+token as Q8_0 by Strata's yardstick), the full 262,144-token context, images
+on the GPU — for 128 GB of RAM.
+
+| Key | Strata installer option |
+|---|---|
+| `STRATA_REPO`, `STRATA_REF` | the checkout in `~/strata` (`STRATA_DIR`), pinned to a release |
+| `STRATA_FAMILY`, `STRATA_MODEL` | `--family`, `--model` (e.g. `unsloth` / `UD-Q5_K_XL`, `nvfp4` / `NVFP4`) |
+| `STRATA_CONTEXT`, `STRATA_KV`, `STRATA_VISION` | `--context`, `--kv`, `--vision` |
+| `STRATA_DATA_DIR` | `--data-dir` (model files, default `~/Strata-data`) |
+| `STRATA_SETUP_ARGS` | any other installer options, verbatim |
+| `LLAMA_HOST`, `LLAMA_PORT` | `--host`, `--port` (shared with llama.cpp) |
+
+- **`build`** checks Strata out and runs its own installer unattended
+  (`--setup --yes --no-start`): it compiles the engine for this GPU with the
+  CUDA toolkit from `drivers` (there is no ready-made Linux build), downloads
+  the model at the revision Strata pins (SHA-256 checked, resumable) and packs
+  it. `model` has nothing left to do; `configure` re-runs the installer with
+  the config's settings (downloads are kept).
+- **`service install`** writes `strata-server.service`: Strata's
+  `run-<model>.sh` as you, `LimitMEMLOCK=infinity` (the engine page-locks tens
+  of GB for the GPU), 30 minutes to load and 5 to stop. It replaces
+  `llama-server.service` — both would use the same port.
+- **API key**: `LLAMA_API_KEY` is never handed to Strata's installer (it would
+  store it in its JSON). The service loads it as a systemd credential and
+  exports it to `STRATA_API_KEY` just before the server starts — not on a
+  command line, not in a file outside `/etc/setup-ubuntu-ai`.
+- Clients: OpenAI API under `http://<host>:8080/v1`, Anthropic Messages under
+  `/v1/messages` (Claude Code: `ANTHROPIC_BASE_URL=http://<host>:8080`).
+
 ## Public access — the platform ingress
 
 The public door is a platform ingress in front of the machine (e.g. a
@@ -389,10 +433,12 @@ deploy.sh                 place a profile, set the API key, run restore
 package-engine.sh         portable, relocatable engine tarball for deploy.sh --engine
 lib/                      shared helpers (logging, config, ui, apt, runtime rendering,
                           your config repository, …)
-modules/                  one file per phase (NN-name.sh, exposes module_main)
+modules/                  one file per phase (NN-name.sh, exposes module_main;
+                          45-strata.sh drives Strata's installer)
 services/                 systemd unit template
 config.bonsai2-27b.conf   RTX 5080 + Bonsai 2 27B: 262k context, vision
 config.qwen3.8-27b-q3kxl.conf  RTX 5070 Ti + Qwen3.8-27B UD-Q3_K_XL: 144k context, text only
+config.strata-ud-q5kxl.conf    RTX 5080 + 128 GB: Strata, Qwen3.8-Flash-Next UD-Q5_K_XL, 262k context
 opencode*.json            OpenCode client configs (local / remote)
 benchmarks/               config-editing accuracy benchmark
 tests/run.sh              behavioural tests (unprivileged sandbox, no GPU needed)

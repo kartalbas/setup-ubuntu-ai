@@ -13,7 +13,7 @@ declare -ga SCRIPT_ARGS=("$@")
 export REPO_ROOT SCRIPT_PATH
 
 # ---- source the library (order matters) ------------------------------------
-for _lib in log core fs config ui version distro privilege apt state thunderbolt hardware runtime configs; do
+for _lib in log core fs config ui version distro privilege apt state thunderbolt hardware runtime strata configs; do
   # shellcheck source=/dev/null
   . "$REPO_ROOT/lib/${_lib}.sh"
 done
@@ -37,10 +37,12 @@ ${C_BOLD}COMMANDS${C_RST} (run them in this order, one at a time, or use the men
   build [--force|--rollback]
                    Build the engine (llama.cpp or a fork) from source; a new
                    build is swapped in only once it works, --rollback swaps
-                   the previous one back
+                   the previous one back. ENGINE=strata: Strata's installer
+                   builds its engine and downloads its model
   model            Download / select a GGUF model (+ vision projector)
   configure        Set context size, GPU layers, host/port, API key, extra args
-  service [sub]    Install llama-server as an auto-starting systemd daemon
+  service [sub]    Install the server (llama-server or strata-server) as an
+                   auto-starting systemd daemon
                    sub = install|uninstall|enable|disable|restart|status
   doctor           Read-only health check of the whole stack
   status           Show detected hardware, config and service state
@@ -147,6 +149,25 @@ ensure_hw_detected() {
   fi
 }
 
+# dispatch_build / dispatch_model / dispatch_configure — the engine's own
+# steps. Strata's installer builds the engine AND fetches the model in one go,
+# so for ENGINE=strata 'build' does both, 'model' has nothing left to do and
+# 'configure' re-runs the installer with the current settings.
+dispatch_build() {
+  if strata_enabled; then run_module 45-strata; else run_module 40-build-llamacpp "$@"; fi
+}
+dispatch_model() {
+  if strata_enabled; then
+    log_info "ENGINE=strata: the model ($(cfg_get STRATA_FAMILY) $(cfg_get STRATA_MODEL)) is fetched by 'build'."
+    MODULE_RC=0
+  else
+    run_module 50-model-manager
+  fi
+}
+dispatch_configure() {
+  if strata_enabled; then run_module 45-strata; else run_module 55-configure-runtime; fi
+}
+
 dispatch_drivers() {
   ensure_hw_detected
   case "$(cfg_get HW_VENDOR)" in
@@ -186,14 +207,23 @@ cmd_status() {
   printf '\n%s%s── Stack ──%s\n' "$C_BOLD" "$C_CYAN" "$C_RST"
   printf '  Driver      : %s\n' "$(_driver_summary)"
   local rev; rev="$(cfg_get LLAMACPP_BUILT_REV)"
-  printf '  Engine      : %s (%s%s, backend: %s)\n' \
+  strata_enabled || printf '  Engine      : %s (%s%s, backend: %s)\n' \
     "$([[ -x "$(llama_bin)" ]] && echo built || echo 'not built')" \
     "$(cfg_get LLAMACPP_REPO "$LLAMACPP_REPO_DEFAULT")" "${rev:+ @ ${rev:0:9}}" "$(cfg_get LLAMACPP_BACKEND '?')"
-  printf '  Model       : %s\n' "$(cfg_get LLAMA_MODEL '(none selected)')"
-  printf '  Vision      : %s\n' "$(cfg_get LLAMA_MMPROJ 'off')"
-  printf '  Context     : %s tokens\n' "$(cfg_get LLAMA_CTX '?')"
+  if strata_enabled; then
+    rev="$(cfg_get STRATA_BUILT_REV)"
+    printf '  Engine      : Strata %s (%s%s)\n' "$([[ -n "$(strata_config)" ]] && echo installed || echo 'not installed')" \
+      "$(cfg_get STRATA_REPO "$STRATA_REPO_DEFAULT")" "${rev:+ @ ${rev:0:9}}"
+    printf '  Model       : %s %s\n' "$(cfg_get STRATA_FAMILY '?')" "$(cfg_get STRATA_MODEL '?')"
+    printf '  Vision      : %s\n' "$(cfg_get STRATA_VISION "Strata's default")"
+    printf '  Context     : %s tokens\n' "$(cfg_get STRATA_CONTEXT "Strata's default")"
+  else
+    printf '  Model       : %s\n' "$(cfg_get LLAMA_MODEL '(none selected)')"
+    printf '  Vision      : %s\n' "$(cfg_get LLAMA_MMPROJ 'off')"
+    printf '  Context     : %s tokens\n' "$(cfg_get LLAMA_CTX '?')"
+  fi
   printf '  API key     : %s\n' "$(cfg_has LLAMA_API_KEY && echo 'required (systemd credential)' || echo 'none — the API is open')"
-  local svc; svc="$(systemctl is-enabled llama-server 2>/dev/null || true)"
+  local svc; svc="$(systemctl is-enabled "$(llm_service)" 2>/dev/null || true)"
   [[ -z "$svc" || "$svc" == "not-found" ]] && svc="not installed"
   printf '  Service     : %s\n' "$svc"
   local pl; pl="$(cfg_get NVIDIA_POWER_LIMIT_W)"
@@ -205,7 +235,8 @@ cmd_uninstall() {
   local what="${1:-}"
   [[ -z "$what" ]] && {
     what="$(ui_menu "Uninstall" "What should I remove?" \
-      drivers "GPU drivers" power "GPU power limit" llamacpp "llama.cpp build" service "llama-server service" all "Everything")" || return 0
+      drivers "GPU drivers" power "GPU power limit" llamacpp "llama.cpp build" strata "Strata engine (models are kept)" \
+      service "the LLM service" all "Everything")" || return 0
   }
   case "$what" in
     drivers)  ensure_hw_detected
@@ -216,9 +247,11 @@ cmd_uninstall() {
               fi ;;
     power)    run_module_fn 35-power-limit module_uninstall ;;
     llamacpp) run_module_fn 40-build-llamacpp module_uninstall ;;
+    strata)   run_module_fn 45-strata module_uninstall ;;
     service)  run_module_fn 60-service-llama module_uninstall ;;
     all)      run_module_fn 60-service-llama module_uninstall || true
               run_module_fn 40-build-llamacpp module_uninstall || true
+              run_module_fn 45-strata module_uninstall || true
               log_warn "GPU drivers left in place (remove manually if desired)." ;;
     *)        die "Unknown uninstall target: $what" ;;
   esac
@@ -250,13 +283,13 @@ cmd_resume() {
 # re-set by the steps themselves, so this just keeps the *roots* correct.
 _restore_rehome() {
   local new_home="$INVOKING_HOME" old_home="" k v
-  for k in LLAMA_MODEL LLAMA_MMPROJ LLAMACPP_DIR MODEL_DIR LLAMACPP_BIN; do
+  for k in LLAMA_MODEL LLAMA_MMPROJ LLAMACPP_DIR MODEL_DIR LLAMACPP_BIN STRATA_DIR STRATA_DATA_DIR STRATA_CONFIG; do
     v="$(cfg_get "$k")"
     if [[ "$v" =~ ^(/home/[^/]+|/root) ]]; then old_home="${BASH_REMATCH[1]}"; break; fi
   done
   [[ -z "$old_home" || "$old_home" == "$new_home" ]] && return 0
   log_warn "Config paths reference ${old_home}; remapping to ${new_home} for this machine."
-  for k in LLAMA_MODEL LLAMA_MMPROJ LLAMACPP_DIR LLAMACPP_BIN MODEL_DIR; do
+  for k in LLAMA_MODEL LLAMA_MMPROJ LLAMACPP_DIR LLAMACPP_BIN MODEL_DIR STRATA_DIR STRATA_DATA_DIR STRATA_CONFIG; do
     v="$(cfg_get "$k")"; [[ -n "$v" ]] && cfg_set "$k" "${v/#$old_home/$new_home}"
   done
   cfg_save
@@ -290,7 +323,10 @@ cmd_config() {
 
 cmd_restore() {
   log_step "Restore: rebuild the whole stack from config (A→Z, unattended)"
-  if [[ -z "$(cfg_get MODEL_REPO)" || -z "$(cfg_get MODEL_FILE)" ]]; then
+  if strata_enabled; then
+    local sp; sp="$(strata_problem)"
+    [[ -z "$sp" ]] || die "${sp} in ${CONFIG_FILE}."
+  elif [[ -z "$(cfg_get MODEL_REPO)" || -z "$(cfg_get MODEL_FILE)" ]]; then
     die "No MODEL_REPO/MODEL_FILE in ${CONFIG_FILE}. Run 'sudo ${0##*/} model' once to capture them (or add them by hand), then retry."
   fi
   # Fail now, not after a long build: the service would refuse this key anyway.
@@ -298,10 +334,17 @@ cmd_restore() {
   [[ -z "$problem" ]] || die "${problem} — set it in ${CONFIG_FILE}, or deploy with: sudo ./deploy.sh <profile> --key KEY"
   _restore_rehome
   log_info "Target    : user=${INVOKING_USER} home=${INVOKING_HOME}"
-  log_info "Engine    : $(cfg_get LLAMACPP_REPO "$LLAMACPP_REPO_DEFAULT")$(cfg_has LLAMACPP_REF && printf ' @ %s' "$(cfg_get LLAMACPP_REF)")"
-  log_info "Model     : $(cfg_get MODEL_REPO) :: $(cfg_get MODEL_FILE)$(cfg_has MODEL_MMPROJ_FILE && printf ' (vision: %s)' "$(cfg_get MODEL_MMPROJ_FILE)")"
-  log_info "Model dir : $(cfg_get MODEL_DIR "$INVOKING_HOME/models")"
-  log_info "Context   : $(cfg_get LLAMA_CTX 8192) tokens, ngl=$(cfg_get LLAMA_NGL 999)"
+  if strata_enabled; then
+    log_info "Engine    : Strata $(cfg_get STRATA_REPO "$STRATA_REPO_DEFAULT")$(cfg_has STRATA_REF && printf ' @ %s' "$(cfg_get STRATA_REF)")"
+    log_info "Model     : $(cfg_get STRATA_FAMILY) $(cfg_get STRATA_MODEL)$(cfg_has STRATA_VISION && printf ' (vision: %s)' "$(cfg_get STRATA_VISION)")"
+    log_info "Model dir : $(strata_data_dir)"
+    log_info "Context   : $(cfg_get STRATA_CONTEXT "Strata's default") tokens"
+  else
+    log_info "Engine    : $(cfg_get LLAMACPP_REPO "$LLAMACPP_REPO_DEFAULT")$(cfg_has LLAMACPP_REF && printf ' @ %s' "$(cfg_get LLAMACPP_REF)")"
+    log_info "Model     : $(cfg_get MODEL_REPO) :: $(cfg_get MODEL_FILE)$(cfg_has MODEL_MMPROJ_FILE && printf ' (vision: %s)' "$(cfg_get MODEL_MMPROJ_FILE)")"
+    log_info "Model dir : $(cfg_get MODEL_DIR "$INVOKING_HOME/models")"
+    log_info "Context   : $(cfg_get LLAMA_CTX 8192) tokens, ngl=$(cfg_get LLAMA_NGL 999)"
+  fi
   log_info "API key   : $(cfg_has LLAMA_API_KEY && echo required || echo none)"
   # Read by the modules run_module sources (subshells inherit shell variables).
   # shellcheck disable=SC2034
@@ -332,9 +375,9 @@ guided_all() {
                  else
                    log_info "No power limit configured — skipping."
                  fi ;;
-      build)     run_module 40-build-llamacpp ;;
-      model)     run_module 50-model-manager ;;
-      configure) run_module 55-configure-runtime ;;
+      build)     dispatch_build ;;
+      model)     dispatch_model ;;
+      configure) if strata_enabled; then log_info "ENGINE=strata: configured by 'build'."; else dispatch_configure; fi ;;
       service)   run_module 60-service-llama install ;;
       doctor)    run_module 90-doctor ;;
     esac
@@ -356,10 +399,10 @@ _menu_status() {
     drivers)   { have nvidia-smi && nvidia-smi -L >/dev/null 2>&1; } || \
                { have vulkaninfo && vulkaninfo --summary >/dev/null 2>&1; } ;;
     power)     [[ -n "$(cfg_get NVIDIA_POWER_LIMIT_W)" ]] ;;
-    build)     [[ -x "$(llama_bin)" ]] ;;
-    model)     [[ -n "$(cfg_get LLAMA_MODEL)" ]] ;;
-    configure) [[ -n "$(cfg_get LLAMA_CTX)" ]] ;;
-    service)   systemctl is-enabled llama-server >/dev/null 2>&1 ;;
+    build)     if strata_enabled; then [[ -n "$(strata_config)" ]]; else [[ -x "$(llama_bin)" ]]; fi ;;
+    model)     if strata_enabled; then [[ -n "$(strata_config)" ]]; else [[ -n "$(cfg_get LLAMA_MODEL)" ]]; fi ;;
+    configure) if strata_enabled; then [[ -n "$(strata_config)" ]]; else [[ -n "$(cfg_get LLAMA_CTX)" ]]; fi ;;
+    service)   systemctl is-enabled "$(llm_service)" >/dev/null 2>&1 ;;
     *)         return 1 ;;
   esac
 }
@@ -387,10 +430,15 @@ main_menu() {
     else
       _add drivers "Install GPU drivers" "GPU driver stack for the detected card"
     fi
-    _add build     "Build llama.cpp"   "compile the inference engine from source"
-    _add model     "Download a model"  "search & fetch a GGUF from Hugging Face"
-    _add configure "Configure runtime" "context size, GPU layers, host & port"
-    _add service   "Install service"   "run llama-server, auto-start on boot"
+    if strata_enabled; then
+      _add build     "Install Strata"    "engine for this GPU + $(cfg_get STRATA_MODEL model) download"
+      _add configure "Configure Strata"  "re-run its installer with the config's settings"
+    else
+      _add build     "Build llama.cpp"   "compile the inference engine from source"
+      _add model     "Download a model"  "search & fetch a GGUF from Hugging Face"
+      _add configure "Configure runtime" "context size, GPU layers, host & port"
+    fi
+    _add service   "Install service"   "run $(llm_service), auto-start on boot"
     _add doctor    "Health check"      "diagnose the whole stack, read-only"
 
     # Render: numeric tags for the ordered steps (auto-aligned two columns),
@@ -418,9 +466,9 @@ main_menu() {
              drivers)   dispatch_drivers ;;
              vram)      run_module 30-amd-vram ;;
              power)     run_module 35-power-limit ;;
-             build)     run_module 40-build-llamacpp ;;
-             model)     run_module 50-model-manager ;;
-             configure) run_module 55-configure-runtime ;;
+             build)     dispatch_build ;;
+             model)     dispatch_model ;;
+             configure) dispatch_configure ;;
              service)   run_module 60-service-llama ;;
              doctor)    run_module 90-doctor ;;
            esac
@@ -458,9 +506,9 @@ main() {
     drivers)    dispatch_drivers ;;
     vram)       run_module 30-amd-vram "${VERB_ARGS[@]}" ;;
     power)      run_module 35-power-limit "${VERB_ARGS[@]}" ;;
-    build)      ensure_hw_detected; run_module 40-build-llamacpp "${VERB_ARGS[@]}" ;;
-    model)      ensure_hw_detected; run_module 50-model-manager ;;
-    configure)  ensure_hw_detected; run_module 55-configure-runtime ;;
+    build)      ensure_hw_detected; dispatch_build "${VERB_ARGS[@]}" ;;
+    model)      ensure_hw_detected; dispatch_model ;;
+    configure)  ensure_hw_detected; dispatch_configure ;;
     service)    run_module 60-service-llama "${VERB_ARGS[@]}" ;;
     doctor)     run_module 90-doctor ;;
     preflight)  run_module 00-preflight ;;

@@ -68,26 +68,41 @@ module_main() {
     fi
   fi
 
-  # --- engine ---
-  local bin; bin="$(llama_bin)"
-  if llama_bin_runs "$bin"; then
-    local rev; rev="$(cfg_get LLAMACPP_BUILT_REV)"
-    _chk "Engine runs: ${bin}${rev:+ (${rev:0:9})}"
-    local cudart; cudart="$(ldd "$(dirname "$bin")/libggml-cuda.so" 2>/dev/null | awk '/libcudart\.so/ {print $3; exit}')"
-    [[ -n "$cudart" ]] && _chk "CUDA runtime used by the engine: $(readlink -f "$cudart")"
-  elif [[ -e "$bin" ]]; then
-    _failx "Engine present but does not run here: ${bin} — run 'build'."
+  # --- engine + model ---
+  if strata_enabled; then
+    local scfg; scfg="$(strata_config)"
+    local srev; srev="$(cfg_get STRATA_BUILT_REV)"
+    if [[ -n "$scfg" ]]; then
+      _chk "Strata installed: $(strata_dir)${srev:+ (${srev:0:9}$(cfg_has STRATA_REF && printf ', %s' "$(cfg_get STRATA_REF)"))}"
+      _chk "Model: $(cfg_get STRATA_FAMILY) $(cfg_get STRATA_MODEL), context $(cfg_get STRATA_CONTEXT default) — ${scfg}"
+    else
+      _failx "Strata not installed for $(cfg_get STRATA_FAMILY '?') $(cfg_get STRATA_MODEL '?') — run 'build'."
+    fi
+    local lim; lim="$(systemctl show -p LimitMEMLOCK --value "$(llm_service)" 2>/dev/null)"
+    if [[ -f "$(llm_unit_file)" ]] && [[ "$lim" != infinity ]]; then
+      _warnx "LimitMEMLOCK is ${lim:-unset}: Strata cannot lock its RAM — run 'service install'."
+    fi
   else
-    _failx "Engine not built — run 'build'."
-  fi
+    local bin; bin="$(llama_bin)"
+    if llama_bin_runs "$bin"; then
+      local rev; rev="$(cfg_get LLAMACPP_BUILT_REV)"
+      _chk "Engine runs: ${bin}${rev:+ (${rev:0:9})}"
+      local cudart; cudart="$(ldd "$(dirname "$bin")/libggml-cuda.so" 2>/dev/null | awk '/libcudart\.so/ {print $3; exit}')"
+      [[ -n "$cudart" ]] && _chk "CUDA runtime used by the engine: $(readlink -f "$cudart")"
+    elif [[ -e "$bin" ]]; then
+      _failx "Engine present but does not run here: ${bin} — run 'build'."
+    else
+      _failx "Engine not built — run 'build'."
+    fi
 
-  # --- model ---
-  local model mmproj; model="$(cfg_get LLAMA_MODEL)"; mmproj="$(cfg_get LLAMA_MMPROJ)"
-  if [[ -n "$model" && -e "$model" ]]; then _chk "Model present: $model"
-  elif [[ -n "$model" ]]; then _failx "Configured model file missing: $model"
-  else _warnx "No model selected — run 'model'."; fi
-  if [[ -n "$mmproj" ]]; then
-    if [[ -e "$mmproj" ]]; then _chk "Vision projector present: $mmproj"; else _failx "Vision projector missing: $mmproj"; fi
+    # --- model ---
+    local model mmproj; model="$(cfg_get LLAMA_MODEL)"; mmproj="$(cfg_get LLAMA_MMPROJ)"
+    if [[ -n "$model" && -e "$model" ]]; then _chk "Model present: $model"
+    elif [[ -n "$model" ]]; then _failx "Configured model file missing: $model"
+    else _warnx "No model selected — run 'model'."; fi
+    if [[ -n "$mmproj" ]]; then
+      if [[ -e "$mmproj" ]]; then _chk "Vision projector present: $mmproj"; else _failx "Vision projector missing: $mmproj"; fi
+    fi
   fi
 
   # --- API key ---
@@ -104,8 +119,9 @@ module_main() {
   fi
 
   # --- service ---
-  if llama_unit_installed; then
-    local act en; act="$(systemctl is-active "$LLAMA_SERVICE" 2>/dev/null)"; en="$(systemctl is-enabled "$LLAMA_SERVICE" 2>/dev/null)"
+  local svc; svc="$(llm_service)"
+  if [[ -f "$(llm_unit_file)" ]]; then
+    local act en; act="$(systemctl is-active "$svc" 2>/dev/null)"; en="$(systemctl is-enabled "$svc" 2>/dev/null)"
     if [[ "$act" == active ]]; then _chk "Service active (boot: ${en})"; else _warnx "Service installed but ${act} (boot: ${en})"; fi
     if [[ "$(_dr_http GET /health)" == 200 ]]; then
       _chk "Health endpoint OK → http://$(cfg_get LLAMA_HOST 0.0.0.0):$(cfg_get LLAMA_PORT 8080)"
@@ -125,7 +141,7 @@ module_main() {
         else _failx "Auth check failed (no key → ${open}, key → ${authd})"; fi
       fi
     else
-      _warnx "No /health response (still loading? check journalctl -u ${LLAMA_SERVICE})."
+      _warnx "No /health response (still loading? check journalctl -u ${svc})."
     fi
   else
     _warnx "Service not installed — run 'service install'."

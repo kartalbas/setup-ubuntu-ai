@@ -153,7 +153,8 @@ info "Running: setup.sh restore  (unattended, may take a while)…"
 
 echo
 info "Done."
-info "Manage:  systemctl status llama-server   ·   journalctl -u llama-server -f"
+SVC=llama-server; [[ "$(conf_value "$CONF_DST" ENGINE)" == strata ]] && SVC=strata-server
+info "Manage:  systemctl status ${SVC}   ·   journalctl -u ${SVC} -f"
 if [[ "$KEY_ORIGIN" == generated ]]; then
   info "Generated API key (clients send it as 'Authorization: Bearer <key>'): ${KEY}"
 fi

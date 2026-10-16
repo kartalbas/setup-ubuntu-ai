@@ -228,6 +228,54 @@ t "set_conf_value replaces and appends verbatim" \
   '[[ "$(cat "$CONF_DST")" == "$(printf '\''A="1"\nLLAMA_API_KEY="x+/y&z\\w"\nB="2"'\'')" ]]'
 
 # ---------------------------------------------------------------------------
+section "strata: the installer is driven from the config, the service from its run script"
+SDIR="$SB/home/strata"; SDATA="$SB/home/Strata-data"; export STRATA_UNIT_FILE="$SB/systemd/strata-server.service"
+mkdir -p "$SDIR/.git"
+# A stand-in for Strata's installer: records its arguments, writes what the real
+# one writes (strata-<tag>.json + run-<tag>.sh).
+cat >"$SDIR/setup.sh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >"$(dirname "$0")/args.log"
+cd "$(dirname "$0")" && echo '{}' >strata-unsloth-ud-q5_k_xl.json && printf '#!/bin/sh\n' >run-unsloth-ud-q5_k_xl.sh && chmod +x run-unsloth-ud-q5_k_xl.sh
+EOF
+chmod +x "$SDIR/setup.sh"
+SKEY='s+/k=y&2'
+write_cfg "ENGINE=strata" "STRATA_DIR=$SDIR" "STRATA_DATA_DIR=$SDATA" "STRATA_REF=v0.1.44.1" \
+  "STRATA_FAMILY=unsloth" "STRATA_MODEL=UD-Q5_K_XL" "STRATA_CONTEXT=262144" "STRATA_KV=int8" "STRATA_VISION=gpu" \
+  "STRATA_SETUP_ARGS=--vram-reserve-mib 1024" "LLAMA_HOST=0.0.0.0" "LLAMA_PORT=8080" "LLAMA_API_KEY=$SKEY" \
+  "HW_VENDOR=nvidia" "CUDA_OK=1"
+: >"$LLAMA_UNIT_FILE"    # a llama-server unit from before: the strata install retires it
+( load; cfg_load
+  git() { echo "git $*" >>"$SB/calls.log"; [[ "$*" == *rev-parse* ]] && echo 0123456789abcdef; return 0; }
+  . "$ROOT/modules/45-strata.sh"; module_main ) >>"$OUT" 2>&1
+t "the installer runs unattended with the config's settings" \
+  '[[ "$(tr "\n" " " <"$SDIR/args.log")" == "--setup --yes --no-start --no-browser --family unsloth --model UD-Q5_K_XL --data-dir $SDATA --host 0.0.0.0 --port 8080 --context 262144 --kv int8 --vision gpu --vram-reserve-mib 1024 " ]]'
+t "the API key is not handed to Strata's installer" '! grep -qF -- "$SKEY" "$SDIR/args.log" && ! grep -q -- --api-key "$SDIR/args.log"'
+t "Strata is pinned to STRATA_REF" 'grep -q "checkout -q v0.1.44.1" "$SB/calls.log"'
+t "the written config is recorded" '[[ "$(cfg_value STRATA_CONFIG)" == "$SDIR/strata-unsloth-ud-q5_k_xl.json" && "$(cfg_value STRATA_BUILT_REV)" == 0123456789abcdef ]]'
+( load; cfg_load; . "$ROOT/modules/60-service-llama.sh"; module_main install ) >>"$OUT" 2>&1
+t "service install writes strata-server.service with the run script" \
+  'grep -qx "WorkingDirectory=$SDIR" "$STRATA_UNIT_FILE" && grep -q "exec \"$SDIR/run-unsloth-ud-q5_k_xl.sh\"" "$STRATA_UNIT_FILE"'
+t "the key is a credential, exported to STRATA_API_KEY at start" \
+  'grep -qx "LoadCredential=api-key:$LLAMA_KEY_FILE" "$STRATA_UNIT_FILE" && grep -qF "STRATA_API_KEY=\"\$\$(cat \"\$\${CREDENTIALS_DIRECTORY}/api-key\")\"" "$STRATA_UNIT_FILE"'
+t "the unit may lock RAM and has time to load and to stop" \
+  'grep -qx "LimitMEMLOCK=infinity" "$STRATA_UNIT_FILE" && grep -qx "TimeoutStartSec=1800" "$STRATA_UNIT_FILE" && grep -qx "TimeoutStopSec=300" "$STRATA_UNIT_FILE"'
+t "the key file holds the key; no unit, output or Strata file does" \
+  '[[ "$(cat "$LLAMA_KEY_FILE")" == "$SKEY" ]] && ! grep -rqF -- "$SKEY" "$STRATA_UNIT_FILE" "$OUT" "$SDIR"'
+t "the llama-server unit is retired" '[[ ! -e "$LLAMA_UNIT_FILE" ]] && grep -q "systemctl disable --now llama-server.service" "$SB/calls.log"'
+t "strata-server is enabled and restarted" \
+  'grep -q "systemctl enable strata-server.service" "$SB/calls.log" && grep -q "systemctl restart strata-server.service" "$SB/calls.log"'
+if command -v systemd-analyze >/dev/null; then
+  t "the rendered unit parses (no unknown or invalid lines)" \
+    '! systemd-analyze verify "$STRATA_UNIT_FILE" 2>&1 | grep -E "Unknown (key|section)|Invalid|Failed to parse|bad unit file"'
+fi
+write_cfg "ENGINE=strata" "STRATA_FAMILY=unsloth"
+t "a missing STRATA_MODEL is named" '[[ "$( ( load; cfg_load; strata_problem ) )" == *STRATA_MODEL* ]]'
+write_cfg "ENGINE=strata" "STRATA_FAMILY=unsloth" "STRATA_MODEL=UD-Q5_K_XL;rm"
+t "a value Strata never takes is refused" '[[ -n "$( ( load; cfg_load; strata_problem ) )" ]]'
+unset STRATA_UNIT_FILE
+
+# ---------------------------------------------------------------------------
 section "drivers: NVIDIA_DRIVER_PKG=latest picks the newest loadable open driver"
 # drv_pick SB_STATE — _nv_pick_pkg against a stubbed archive: 615 and 610
 # (transitional) are offered, 615 has no signed module, 595 has one.

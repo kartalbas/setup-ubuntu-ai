@@ -1,0 +1,32 @@
+[Unit]
+Description=Strata server (setup-ubuntu-ai)
+Documentation=https://github.com/Niko1221/Strata
+# The GPU must be initialised (persistence daemon) and power-capped before the
+# model loads. Ordering only: on hosts without these units it is a no-op.
+After=network-online.target nvidia-persistenced.service nvidia-powerlimit.service
+Wants=network-online.target
+Conflicts=llama-server.service
+# Give up after 3 failures in 30 min instead of reloading 100+ GB in a loop.
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+[Service]
+Type=exec
+User=@USER@
+SupplementaryGroups=video render
+WorkingDirectory=@DIR@
+@CREDENTIAL@
+ExecStart=@START@
+# The engine page-locks tens of GB of RAM for the GPU.
+LimitMEMLOCK=infinity
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+# Loading the model (100+ GB from disk) takes minutes; releasing the locked
+# RAM on SIGTERM takes longer than systemd's default 90 s stop timeout allows
+# on a slow disk.
+TimeoutStartSec=1800
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target

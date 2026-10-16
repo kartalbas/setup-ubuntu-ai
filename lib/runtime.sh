@@ -276,28 +276,29 @@ render_llama_unit() {
 # llama_restart — restart the service (after a daemon-reload) and wait until
 # the model has loaded.
 llama_restart() {
-  run systemctl restart "${LLAMA_SERVICE}.service" || return 1
-  llama_wait_healthy
+  local svc; svc="$(llm_service)"
+  run systemctl restart "${svc}.service" || return 1
+  if strata_enabled; then llama_wait_healthy 1800; else llama_wait_healthy; fi
 }
 
 # llama_wait_healthy [TIMEOUT_S] — poll /health until the model has loaded;
 # fail fast if the service dies meanwhile.
 llama_wait_healthy() {
-  local timeout="${1:-300}" port waited=0
+  local timeout="${1:-300}" port waited=0 svc; svc="$(llm_service)"
   [[ "${DRY_RUN:-0}" == "1" ]] && return 0
   port="$(cfg_get LLAMA_PORT 8080)"
-  log_info "Waiting for llama-server on :${port} (loading the model takes a while)…"
+  log_info "Waiting for ${svc} on :${port} (loading the model takes a while)…"
   while (( waited < timeout )); do
     if curl -fsS --max-time 3 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
-      log_ok "llama-server is healthy on :${port} (after ${waited}s)."
+      log_ok "${svc} is healthy on :${port} (after ${waited}s)."
       return 0
     fi
-    if ! systemctl is-active --quiet "${LLAMA_SERVICE}.service"; then
-      log_error "llama-server stopped while loading — see: journalctl -u ${LLAMA_SERVICE} -e"
+    if ! systemctl is-active --quiet "${svc}.service"; then
+      log_error "${svc} stopped while loading — see: journalctl -u ${svc} -e"
       return 1
     fi
     sleep 3; waited=$((waited + 3))
   done
-  log_error "llama-server did not become healthy within ${timeout}s — see: journalctl -u ${LLAMA_SERVICE} -e"
+  log_error "${svc} did not become healthy within ${timeout}s — see: journalctl -u ${svc} -e"
   return 1
 }
