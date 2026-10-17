@@ -31,6 +31,8 @@ ${C_BOLD}USAGE${C_RST}
 
 ${C_BOLD}COMMANDS${C_RST} (run them in this order, one at a time, or use the menu)
   detect           Identify the GPU and save the hardware profile
+  time             Time zone (TIMEZONE, default Europe/Zurich), NTP on, GNOME's
+                   GeoIP time zone off
   drivers          Install the driver stack (NVIDIA CUDA, or AMD Vulkan)
   vram <GiB>       AMD Strix Halo only: set the unified-memory / GTT split
   power [WATTS]    NVIDIA only: cap GPU power (TDP), re-applied on every boot
@@ -510,6 +512,7 @@ main() {
 
   case "${VERB:-menu}" in
     detect)     run_module 10-detect-hardware ;;
+    time)       run_module 15-time ;;
     drivers)    dispatch_drivers ;;
     vram)       run_module 30-amd-vram "${VERB_ARGS[@]}" ;;
     power)      run_module 35-power-limit "${VERB_ARGS[@]}" ;;

@@ -55,6 +55,7 @@ sudo ./setup.sh
 
 ```bash
 sudo ./setup.sh detect              # 1. identify the GPU, save the profile
+sudo ./setup.sh time                # 1b. time zone (TIMEZONE, default Europe/Zurich), NTP, no GNOME GeoIP zone
 sudo ./setup.sh drivers             # 2. NVIDIA CUDA stack, or AMD Vulkan stack
 sudo ./setup.sh vram 64             # 2b. AMD Strix Halo only: 64 GiB GPU memory
 sudo ./setup.sh power 350           # 2c. NVIDIA only: cap GPU at 350W (persistent)
