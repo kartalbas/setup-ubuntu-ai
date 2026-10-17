@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # tools/llm-monitor — the LLM server's vital signs, refreshed in place:
 # RAM, GPU memory/temperature/power/load, CPU load/clock/temperatures,
-# RAM-module temperatures, what the server is doing, and — for Strata — how the
+# RAM-module temperatures, what the model is doing (state, tokens per second
+# writing and reading, context in use, drafts accepted — from the server's
+# /metrics; the API key is read once from the service credential with sudo, or
+# from $LLAMA_API_KEY), and — for Strata — how the
 # engine reads its model files from disk: the lookup (PLE) table it keeps on
 # the SSD, how it opened it (O_DIRECT bypasses the page cache), how much of it
 # is cached, how fast and how often it reads, when it last did, and what the
@@ -11,6 +14,7 @@
 set -uo pipefail
 INTERVAL="${1:-3}"
 PORT="${LLAMA_PORT:-8080}"
+KEY="${LLAMA_API_KEY:-$(sudo -n head -1 /etc/setup-ubuntu-ai/api-key 2>/dev/null || true)}"
 
 # hwmon_temp NAME LABEL — °C of the sensor whose hwmon name and label match.
 hwmon_temp() {
@@ -117,6 +121,27 @@ while :; do
     printf '  %-10s %s  %5s °C\033[K\n' "temp DIMM$i" "$(bar "$(num "$d")" 85)" "$d"
   done
   printf '\033[K\n  %-10s %s, /health %s on :%s\033[K\n\033[J' "server" "$svc" "${health:-–}" "$PORT"
+  # --- the model: what it is doing and how fast (Strata's /metrics JSON)
+  m="$(curl -s --max-time 2 ${KEY:+-H "Authorization: Bearer ${KEY}"} "http://127.0.0.1:${PORT}/metrics" 2>/dev/null)"
+  if jq -e '.live' >/dev/null 2>&1 <<<"$m"; then
+    IFS=$'\t' read -r st ph pt gen mx tks tkm pfm req out reuse ptot dro dra < <(jq -r '[
+      .live.state // "idle", (.live.phase // "" | .[0:48]), .live.prompt_tokens // 0, .live.generated // 0,
+      .live.max_tokens // 0, .live.tok_s // 0, .live.tok_s_mean // 0, .live.prefill_tok_s_mean // 0,
+      .totals.requests // 0, .totals.output_tokens // 0, .totals.reused // 0, .totals.prompt_tokens // 0,
+      .totals.drafts_offered // 0, .totals.drafts_accepted // 0] | @tsv' <<<"$m")
+    ctx="$(curl -s --max-time 2 ${KEY:+-H "Authorization: Bearer ${KEY}"} "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null \
+      | jq -r '.data[0].context_length // .data[0].max_model_len // 262144' 2>/dev/null)"
+    printf '\033[K\n\033[1m LLM  %s\033[0m  %s\033[K\n' "$st" "$ph"
+    printf '  %-10s %s  %5.1f tok/s   (mean %.1f)\033[K\n' "writing" "$(bar "$tks" 100)" "$tks" "$tkm"
+    printf '  %-10s %s  %5.0f tok/s   (prompt read, mean)\033[K\n' "reading" "$(bar "$pfm" 4000)" "$pfm"
+    printf '  %-10s %s  %6s / %s tokens\033[K\n' "context" "$(bar "$pt" "${ctx:-262144}")" "$pt" "${ctx:-262144}"
+    printf '  %-10s %s  %6s / %s tokens\033[K\n' "answer" "$(bar "$gen" "${mx:-1}")" "$gen" "$mx"
+    printf '  %-10s %s  %5s %%   of %s drafted tokens accepted\033[K\n' "drafts" \
+      "$(bar "$dra" "$dro")" "$(awk -v a="$dra" -v o="$dro" 'BEGIN {printf "%.0f", (o > 0) ? a / o * 100 : 0}')" "$dro"
+    printf '  %-10s %s requests, %s tokens written, %s of %s prompt tokens from cache\033[K\n' "since start" \
+      "$req" "$out" "$reuse" "$ptot"
+  fi
+
   # --- the engine's model files and the disk under them
   p="$(engine_pid)"
   if [[ -n "$p" ]]; then
