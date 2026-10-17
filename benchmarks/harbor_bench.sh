@@ -13,7 +13,9 @@
 #   AGENT=claude-code benchmarks/harbor_bench.sh tbench    another agent
 #   benchmarks/harbor_bench.sh swe-verified --summary      the score so far
 #
-# A job is named after benchmark, agent and model and lives in $BENCH_JOBS_DIR
+#   BENCH_JOB=tbench-local5 benchmarks/harbor_bench.sh tbench -i '*regex-log'   a subset as its own job
+#
+# A job is named after benchmark, agent and model (BENCH_JOB overrides) and lives in $BENCH_JOBS_DIR
 # (default ~/bench-jobs); running the same benchmark again resumes it. One task
 # at a time (the server answers one request at a time; BENCH_CONCURRENCY to
 # change); trials a stop or the infrastructure ended run again on resume
@@ -46,7 +48,7 @@ MODEL="$(curl -fsS "${H[@]}" "http://127.0.0.1:${PORT}/v1/models" | python3 -c '
   || { echo "the server on :${PORT} does not answer" >&2; exit 1; }
 CTX="$(curl -fsS "${H[@]}" "http://127.0.0.1:${PORT}/v1/models" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"][0]; print(d.get("context_length") or d.get("max_model_len") or 131072)')"
 GW="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
-JOB="${BENCH}-${AGENT}-${MODEL}"
+JOB="${BENCH_JOB:-${BENCH}-${AGENT}-${MODEL}}"
 install -d -m 700 "$JOBS"
 
 if [[ " $* " == *" --summary "* ]]; then
