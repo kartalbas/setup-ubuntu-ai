@@ -16,7 +16,8 @@
 # A job is named after benchmark, agent and model and lives in $BENCH_JOBS_DIR
 # (default ~/bench-jobs); running the same benchmark again resumes it. One task
 # at a time (the server answers one request at a time; BENCH_CONCURRENCY to
-# change). The API key comes from the service credential (sudo) and goes into
+# change); trials a stop or the infrastructure ended run again on resume
+# (BENCH_RERUN_ERRORS). The API key comes from the service credential (sudo) and goes into
 # the agent's environment only: job configs are written mode 600, and the jobs
 # dir is kept mode 700.
 set -euo pipefail
@@ -66,8 +67,13 @@ PY
 fi
 
 if [[ -f "$JOBS/$JOB/config.json" ]]; then
-  echo "▶ resuming ${JOB} (${JOBS}/${JOB})"
-  exec harbor job resume -p "$JOBS/$JOB" "$@"
+  # Trials a stop or the infrastructure ended (not the model) run again; the
+  # job's own settings stay, so `harbor run` options are not passed on.
+  RERUN="${BENCH_RERUN_ERRORS:-CancelledError RuntimeError ValueError}"
+  filters=(); for e in $RERUN; do filters+=(-f "$e"); done
+  (( $# )) && echo "  (resuming: the options '$*' are the job's own already and are not passed on)"
+  echo "▶ resuming ${JOB} (${JOBS}/${JOB}), re-running trials that ended in: ${RERUN}"
+  exec harbor job resume -p "$JOBS/$JOB" "${filters[@]}"
 fi
 
 CFG="$(mktemp --suffix=.json)"; chmod 600 "$CFG"; trap 'rm -f "$CFG"' EXIT
