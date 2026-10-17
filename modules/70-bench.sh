@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # modules/70-bench.sh — what the public agent benchmarks need on this machine:
-# Docker (each task runs in its own container) and Harbor, the harness that
+# Docker with Compose (each task runs in its own container) and Harbor, the harness that
 # runs SWE-bench Verified / Pro and Terminal-Bench with an agent such as
 # OpenCode or Claude Code against this server and grades the result with the
 # benchmark's own tests. benchmarks/harbor_bench.sh runs them.
@@ -14,7 +14,7 @@ _bench_harbor() { as_user env PATH="$INVOKING_HOME/.local/bin:/usr/bin:/bin" har
 module_main() {
   log_step "Benchmark harness: Docker + Harbor"
   local ver; ver="$(cfg_get HARBOR_VERSION "$HARBOR_VERSION_DEFAULT")"
-  apt_install docker.io docker-buildx pipx
+  apt_install docker.io docker-buildx docker-compose-v2 pipx
   run systemctl enable --now docker.service
   if ! id -nG "$INVOKING_USER" | tr ' ' '\n' | grep -qx docker; then
     narrate "Adding ${INVOKING_USER} to the docker group (new logins get it; sudo -u gets it at once)."

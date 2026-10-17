@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # tools/llm-monitor — the LLM server's vital signs, refreshed in place:
 # RAM, GPU memory/temperature/power/load, CPU load/clock/temperatures,
-# RAM-module temperatures, and what the server is doing. Read-only; Ctrl-C ends it.
+# RAM-module temperatures, what the server is doing, and — for Strata — how the
+# engine reads its model files from disk: the lookup (PLE) table it keeps on
+# the SSD, how it opened it (O_DIRECT bypasses the page cache), how much of it
+# is cached, how fast and how often it reads, when it last did, and what the
+# disk under it is doing. Read-only; Ctrl-C ends it.
 #   tools/llm-monitor          every 3 s
 #   tools/llm-monitor 1        every second
 set -uo pipefail
@@ -38,6 +42,35 @@ bar() {
     s = ""; for (i = 0; i < w; i++) s = s (i < n ? "█" : "░"); printf "\033[%dm%s\033[0m", c, s }'
 }
 
+# engine_pid — the Strata engine (or llama-server) process.
+engine_pid() { pgrep -x strata 2>/dev/null | head -1 || true; }
+
+# engine_files PID — the model files the engine holds open: "path flags" lines.
+engine_files() {
+  local fd t n
+  for fd in /proc/"$1"/fd/*; do
+    t="$(readlink "$fd" 2>/dev/null)" || continue
+    [[ "$t" == *.gguf || "$t" == */experts.bin ]] || continue
+    n="${fd##*/}"
+    printf '%s %s\n' "$t" "$(awk '/^flags:/ {print $2}' "/proc/$1/fdinfo/$n" 2>/dev/null)"
+  done | sort -u
+}
+
+# io_counters PID — "read_bytes syscr" of the process (storage reads, read calls).
+io_counters() { awk '/^read_bytes:/ {b=$2} /^syscr:/ {c=$2} END {print b+0, c+0}' "/proc/$1/io" 2>/dev/null || echo "0 0"; }
+
+# disk_of FILE — the whole disk under FILE (sda for /dev/sda2).
+disk_of() {
+  local src; src="$(df --output=source "$1" 2>/dev/null | tail -1)"
+  lsblk -no pkname "$src" 2>/dev/null | head -1 || basename "$src"
+}
+
+# disk_stat DISK — "reads sectors_read read_ms io_ms" since boot.
+disk_stat() { awk '{print $1, $3, $4, $10}' "/sys/block/$1/stat" 2>/dev/null || echo "0 0 0 0"; }
+
+human() { awk -v b="$1" 'BEGIN { split("B KB MB GB TB", u); i = 1; while (b >= 1000 && i < 5) { b /= 1000; i++ }
+  printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i] }'; }
+
 # cpu_ticks — "busy total" jiffies of all CPUs since boot (/proc/stat).
 cpu_ticks() { awk '/^cpu / {t=0; for (i=2; i<=NF; i++) t+=$i; print t-$5-$6, t}' /proc/stat; }
 
@@ -45,7 +78,9 @@ trap 'tput cnorm 2>/dev/null; echo; exit 0' INT TERM
 tput civis 2>/dev/null
 clear
 read -r cb0 ct0 < <(cpu_ticks)
+epid=""; erb0=0; ecr0=0; last_read=""; dsk=""; dr0=0; ds0=0; dm0=0; dio0=0; t0=$(date +%s.%N)
 while :; do
+  t1=$(date +%s.%N); dt="$(awk -v a="$t0" -v b="$t1" 'BEGIN {d = b - a; print (d > 0) ? d : 1}')"; t0=$t1
   read -r cb1 ct1 < <(cpu_ticks)
   cpu_pct="$(awk -v b=$((cb1 - cb0)) -v t=$((ct1 - ct0)) 'BEGIN {printf "%.0f", (t > 0) ? b / t * 100 : 0}')"
   cb0=$cb1; ct0=$ct1
@@ -82,5 +117,40 @@ while :; do
     printf '  %-10s %s  %5s °C\033[K\n' "temp DIMM$i" "$(bar "$(num "$d")" 85)" "$d"
   done
   printf '\033[K\n  %-10s %s, /health %s on :%s\033[K\n\033[J' "server" "$svc" "${health:-–}" "$PORT"
+  # --- the engine's model files and the disk under them
+  p="$(engine_pid)"
+  if [[ -n "$p" ]]; then
+    read -r erb ecr < <(io_counters "$p")
+    if [[ "$p" != "$epid" ]]; then epid=$p; erb0=$erb; ecr0=$ecr; last_read=""; fi
+    files="$(engine_files "$p")"
+    ple="$(awk '{print $1}' <<<"$files" | grep -m1 -- '-00003-of-' || awk 'NR == 1 {print $1}' <<<"$files")"
+    [[ -n "$ple" && -z "$dsk" ]] && { dsk="$(disk_of "$ple")"; read -r dr0 ds0 dm0 dio0 < <(disk_stat "$dsk"); }
+    rate="$(awk -v d=$((erb - erb0)) -v t="$dt" 'BEGIN {printf "%.0f", d / t}')"
+    calls="$(awk -v d=$((ecr - ecr0)) -v t="$dt" 'BEGIN {printf "%.0f", d / t}')"
+    (( erb > erb0 )) && last_read=$(date +%s)
+    erb0=$erb; ecr0=$ecr
+    printf '\033[K\n\033[1m MODEL FILES  engine pid %s, up %s\033[0m\033[K\n' "$p" "$(ps -o etime= -p "$p" | tr -d ' ')"
+    while read -r f fl; do
+      [[ -n "$f" ]] || continue
+      size="$(stat -c %s "$f" 2>/dev/null || echo 0)"
+      if (( (8#${fl:-0} & 8#40000) != 0 )); then mode="O_DIRECT (no page cache)"; else
+        res="$(fincore -b -n -o RES "$f" 2>/dev/null | tr -d ' ')"; mode="cached $(awk -v r="${res:-0}" -v s="$size" 'BEGIN {printf "%.0f", (s > 0) ? r / s * 100 : 0}') %"; fi
+      printf '  %-10s %s  %s\033[K\n' "$( [[ "$f" == "$ple" ]] && echo 'PLE table' || echo 'open')" "$(human "$size")" "${f##*/}  ·  ${mode}"
+    done <<<"$files"
+    printf '  %-10s %s  %8s/s  %6s reads/s\033[K\n' "reading" "$(bar "$rate" 2000000000)" "$(human "$rate")" "$calls"
+    if [[ -n "$last_read" ]]; then ago=$(( $(date +%s) - last_read )); lr="$( (( ago < 1 )) && echo 'now' || echo "${ago}s ago")"; else lr="not since the monitor started"; fi
+    printf '  %-10s %s   ·  since start %s in %s read calls\033[K\n' "last read" "$lr" "$(human "$erb")" "$ecr"
+    if [[ -n "$dsk" ]]; then
+      read -r dr ds dm dio < <(disk_stat "$dsk")
+      drate="$(awk -v s=$((ds - ds0)) -v t="$dt" 'BEGIN {printf "%.0f", s * 512 / t}')"
+      diops="$(awk -v r=$((dr - dr0)) -v t="$dt" 'BEGIN {printf "%.0f", r / t}')"
+      dutil="$(awk -v m=$((dio - dio0)) -v t="$dt" 'BEGIN {u = m / (t * 10); printf "%.0f", (u > 100) ? 100 : u}')"
+      dlat="$(awk -v m=$((dm - dm0)) -v r=$((dr - dr0)) 'BEGIN {printf (r > 0) ? "%.2f ms" : "–", (r > 0) ? m / r : 0}')"
+      dr0=$dr; ds0=$ds; dm0=$dm; dio0=$dio
+      printf '  %-10s %s  %5s %%   %s/s, %s IOPS, %s per read  (/dev/%s, %s)\033[K\n' "disk busy" "$(bar "$dutil" 100)" "$dutil" \
+        "$(human "$drate")" "$diops" "$dlat" "$dsk" "$(cat "/sys/block/$dsk/device/model" 2>/dev/null | xargs)"
+    fi
+    printf '\033[J'
+  fi
   sleep "$INTERVAL"
 done

@@ -453,7 +453,8 @@ config.strata-ud-q5kxl.conf    RTX 5080 + 128 GB: Strata, Qwen3.8-Flash-Next UD-
 opencode*.json            OpenCode client configs (local / remote / Strata)
 benchmarks/               config-editing accuracy; context_bench.py: speed + needle at 4k-256k
 tests/run.sh              behavioural tests (unprivileged sandbox, no GPU needed)
-tools/llm-monitor         live GPU / CPU / RAM bars (load, power, clocks, temperatures) and the server, every 3 s
+tools/llm-monitor         live GPU / CPU / RAM bars (load, power, clocks, temperatures), the server, and how
+                          the engine reads its model files (PLE table: O_DIRECT/cache, rate, reads/s, disk busy)
 ```
 
 The `model` step is a **live Hugging Face search** — type a query, pick a repo
