@@ -44,6 +44,8 @@ ${C_BOLD}COMMANDS${C_RST} (run them in this order, one at a time, or use the men
   service [sub]    Install the server (llama-server or strata-server) as an
                    auto-starting systemd daemon
                    sub = install|uninstall|enable|disable|restart|status
+  bench            Docker + Harbor for the public agent benchmarks
+                   (SWE-bench Verified/Pro, Terminal-Bench): benchmarks/harbor_bench.sh
   doctor           Read-only health check of the whole stack
   status           Show detected hardware, config and service state
   uninstall [what] Reverse a step (drivers|llamacpp|service|all)
@@ -248,6 +250,7 @@ cmd_uninstall() {
     power)    run_module_fn 35-power-limit module_uninstall ;;
     llamacpp) run_module_fn 40-build-llamacpp module_uninstall ;;
     strata)   run_module_fn 45-strata module_uninstall ;;
+    bench)    run_module_fn 70-bench module_uninstall ;;
     service)  run_module_fn 60-service-llama module_uninstall ;;
     all)      run_module_fn 60-service-llama module_uninstall || true
               run_module_fn 40-build-llamacpp module_uninstall || true
@@ -515,6 +518,7 @@ main() {
     configure)  ensure_hw_detected; dispatch_configure ;;
     service)    run_module 60-service-llama "${VERB_ARGS[@]}" ;;
     doctor)     run_module 90-doctor ;;
+    bench)      run_module 70-bench ;;
     preflight)  run_module 00-preflight ;;
     status)     cmd_status ;;
     uninstall)  cmd_uninstall "${VERB_ARGS[@]}" ;;
